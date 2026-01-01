@@ -22,21 +22,15 @@ ENABLE_SOLVER_DIAGNOSTICS = False  # Set to False to disable diagnostic output
 # SOLVER LOGGING CONFIGURATION (Granular Control)
 # ============================================================================
 # Each toggle controls a specific phase of the solver's activity
-SHOW_MODEL_STATISTICS = True       # Print model size (variables, constraints) before solving
-SHOW_PRESOLVE_LOGS = True          # Show presolve phase (constraint propagation, simplification)
-SHOW_SEARCH_LOGS = True            # Show search phase (branching, conflicts, restarts)
-SHOW_SOLUTION_LOGS = True          # Show when intermediate solutions are found
-SHOW_OPTIMIZATION_LOGS = True      # Show detailed progress during solution improvement
+SHOW_MODEL_STATISTICS = True        # Print model size (variables, constraints) before solving
+SHOW_PRESOLVE_LOGS = False          # Show presolve phase (constraint propagation, simplification)
+SHOW_SEARCH_LOGS = False            # Show search phase (branching, conflicts, restarts)
+SHOW_SOLUTION_LOGS = False          # Show when intermediate solutions are found
+SHOW_OPTIMIZATION_LOGS = True       # Show detailed progress during solution improvement
 # ============================================================================
 
 # Global variable to store diagnostics file path (set by run_scheduler)
 _diagnostics_file_path = None
-
-# NOTE: write_solver_diagnostics has been moved to export_debug.py
-# NOTE: SolutionPrinterCallback has been moved to solver_callback.py
-# NOTE: print_ghost_grid_debug has been moved to export_debug.py
-# NOTE: print_all_meetings_debug has been moved to export_debug.py
-# NOTE: print_raw_violations has been moved to export_reports.py
 
 def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_limit=None, random_seed=None, deterministic_mode=False, output_folder=None, pass_mode="full", structural_limit=None, pass1_hints=None):
     """
@@ -554,6 +548,10 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
     batch_active_streak = {}    # (b_idx, day_idx) -> list of IntVars
     batch_vacant_streak = {}    # (b_idx, day_idx) -> list of IntVars
     
+    # Storage for gap_ends_here detection (created once, reused in hard/soft constraints)
+    faculty_gap_ends_here = {}  # (f_idx, day_idx) -> list of BoolVars
+    batch_gap_ends_here = {}    # (b_idx, day_idx) -> list of BoolVars
+    
     # Faculty Streak Tracking
     for f_idx in range(len(faculty)):
         for day_idx in range(len(config["SCHEDULING_DAYS"])):
@@ -601,6 +599,30 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
                     model.Add(vacant_streak == prev_vacant + 1).OnlyEnforceIf(time_slot.Not())
                 
                 faculty_vacant_streak[(f_idx, day_idx)].append(vacant_streak)
+            
+            # Create gap_ends_here detection for this faculty-day (reused in hard/soft constraints)
+            faculty_gap_ends_here[(f_idx, day_idx)] = []
+            for i in range(N):
+                if i < N - 1:
+                    time_slot = ghost_slots[i]["time_slot"]
+                    next_time_slot = ghost_slots[i+1]["time_slot"]
+                    vacant_streak = faculty_vacant_streak[(f_idx, day_idx)][i]
+                    
+                    # Check if we've encountered a class before (VacantStreak[i] <= i)
+                    encountered_class_before = model.NewBoolVar(f"encountered_class_f{f_idx}_d{day_idx}_i{i}")
+                    model.Add(vacant_streak <= i).OnlyEnforceIf(encountered_class_before)
+                    model.Add(vacant_streak > i).OnlyEnforceIf(encountered_class_before.Not())
+                    
+                    gap_ends_here = model.NewBoolVar(f"gap_ends_f{f_idx}_d{day_idx}_i{i}")
+                    
+                    # gap_ends_here = (time_slot == 0) AND (next_time_slot == 1) AND (encountered_class_before)
+                    model.AddBoolAnd([time_slot.Not(), next_time_slot, encountered_class_before]).OnlyEnforceIf(gap_ends_here)
+                    model.AddBoolOr([time_slot, next_time_slot.Not(), encountered_class_before.Not()]).OnlyEnforceIf(gap_ends_here.Not())
+                    
+                    faculty_gap_ends_here[(f_idx, day_idx)].append(gap_ends_here)
+                else:
+                    # Last slot has no "next" - cannot end a gap before a class
+                    faculty_gap_ends_here[(f_idx, day_idx)].append(None)
     
     # Batch Streak Tracking
     for b_idx in range(len(batches)):
@@ -639,6 +661,30 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
                     model.Add(vacant_streak == prev_vacant + 1).OnlyEnforceIf(time_slot.Not())
                 
                 batch_vacant_streak[(b_idx, day_idx)].append(vacant_streak)
+            
+            # Create gap_ends_here detection for this batch-day (reused in hard/soft constraints)
+            batch_gap_ends_here[(b_idx, day_idx)] = []
+            for i in range(N):
+                if i < N - 1:
+                    time_slot = ghost_slots[i]["time_slot"]
+                    next_time_slot = ghost_slots[i+1]["time_slot"]
+                    vacant_streak = batch_vacant_streak[(b_idx, day_idx)][i]
+                    
+                    # Check if we've encountered a class before (VacantStreak[i] <= i)
+                    encountered_class_before = model.NewBoolVar(f"encountered_class_b{b_idx}_d{day_idx}_i{i}")
+                    model.Add(vacant_streak <= i).OnlyEnforceIf(encountered_class_before)
+                    model.Add(vacant_streak > i).OnlyEnforceIf(encountered_class_before.Not())
+                    
+                    gap_ends_here = model.NewBoolVar(f"gap_ends_b{b_idx}_d{day_idx}_i{i}")
+                    
+                    # gap_ends_here = (time_slot == 0) AND (next_time_slot == 1) AND (encountered_class_before)
+                    model.AddBoolAnd([time_slot.Not(), next_time_slot, encountered_class_before]).OnlyEnforceIf(gap_ends_here)
+                    model.AddBoolOr([time_slot, next_time_slot.Not(), encountered_class_before.Not()]).OnlyEnforceIf(gap_ends_here.Not())
+                    
+                    batch_gap_ends_here[(b_idx, day_idx)].append(gap_ends_here)
+                else:
+                    # Last slot has no "next" - cannot end a gap before a class
+                    batch_gap_ends_here[(b_idx, day_idx)].append(None)
     
     total_streak_vars = (len(faculty) + len(batches)) * len(config["SCHEDULING_DAYS"]) * 2
     avg_slots_per_day = len(faculty_ghost_grid[(0, 0)])
@@ -677,15 +723,9 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
                 total_max_class_constraints += 1
                 
                 # HARD: Min Gap - VacantStreak[i] >= MIN_GAP_SLOTS when gap ends
-                # GapEndsHere = (TimeSlots[i] == 0) AND (i < N-1 AND TimeSlots[i+1] == 1) AND (VacantStreak[i] <= i)
-                if i < N - 1:
-                    next_time_slot = slots[i+1]["time_slot"]
-                    gap_ends_here = model.NewBoolVar(f"gap_ends_f{f_idx}_d{day_idx}_i{i}")
-                    
-                    # gap_ends_here = (time_slot == 0) AND (next_time_slot == 1) AND (vacant_streak <= i)
-                    model.AddBoolAnd([time_slot.Not(), next_time_slot]).OnlyEnforceIf(gap_ends_here)
-                    model.AddBoolOr([time_slot, next_time_slot.Not()]).OnlyEnforceIf(gap_ends_here.Not())
-                    
+                # Reuse pre-computed gap_ends_here (includes 3-condition check)
+                gap_ends_here = faculty_gap_ends_here[(f_idx, day_idx)][i]
+                if gap_ends_here is not None:
                     # If gap_ends_here, then vacant_streak >= MIN_GAP_SLOTS
                     model.Add(vacant_streak >= MIN_GAP_SLOTS).OnlyEnforceIf(gap_ends_here)
                     total_min_gap_constraints += 1
@@ -706,14 +746,9 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
                 total_max_class_constraints += 1
                 
                 # HARD: Min Gap - VacantStreak[i] >= MIN_GAP_SLOTS when gap ends
-                if i < N - 1:
-                    next_time_slot = slots[i+1]["time_slot"]
-                    gap_ends_here = model.NewBoolVar(f"gap_ends_b{b_idx}_d{day_idx}_i{i}")
-                    
-                    # gap_ends_here = (time_slot == 0) AND (next_time_slot == 1)
-                    model.AddBoolAnd([time_slot.Not(), next_time_slot]).OnlyEnforceIf(gap_ends_here)
-                    model.AddBoolOr([time_slot, next_time_slot.Not()]).OnlyEnforceIf(gap_ends_here.Not())
-                    
+                # Reuse pre-computed gap_ends_here (includes 3-condition check)
+                gap_ends_here = batch_gap_ends_here[(b_idx, day_idx)][i]
+                if gap_ends_here is not None:
                     # If gap_ends_here, then vacant_streak >= MIN_GAP_SLOTS
                     model.Add(vacant_streak >= MIN_GAP_SLOTS).OnlyEnforceIf(gap_ends_here)
                     total_min_gap_constraints += 1
@@ -1468,16 +1503,10 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
                     total_min_class_violations += 1
                     
                     # SOFT: Max Gap
-                    # GapEndsHere = (TimeSlots[i] == 0) AND (i < N-1 AND TimeSlots[i+1] == 1)
+                    # Reuse pre-computed gap_ends_here (includes 3-condition check)
                     # Penalty: Max(0, VacantStreak[i] - MAX_GAP_SLOTS)
-                    if i < N - 1:
-                        next_time_slot = slots[i+1]["time_slot"]
-                        gap_ends_here = model.NewBoolVar(f"gap_ends_soft_f{f_idx}_d{day_idx}_i{i}")
-                        
-                        # gap_ends_here = (time_slot == 0) AND (next_time_slot == 1)
-                        model.AddBoolAnd([time_slot.Not(), next_time_slot]).OnlyEnforceIf(gap_ends_here)
-                        model.AddBoolOr([time_slot, next_time_slot.Not()]).OnlyEnforceIf(gap_ends_here.Not())
-                        
+                    gap_ends_here = faculty_gap_ends_here[(f_idx, day_idx)][i]
+                    if gap_ends_here is not None:
                         # Violation: Max(0, vacant_streak - MAX_GAP_SLOTS)
                         violation = model.NewIntVar(0, 100, f"max_gap_viol_f{f_idx}_d{day_idx}_i{i}")
                         model.Add(violation >= vacant_streak - MAX_GAP_SLOTS).OnlyEnforceIf(gap_ends_here)
@@ -1514,13 +1543,9 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
                     total_min_class_violations += 1
                     
                     # SOFT: Max Gap
-                    if i < N - 1:
-                        next_time_slot = slots[i+1]["time_slot"]
-                        gap_ends_here = model.NewBoolVar(f"gap_ends_soft_b{b_idx}_d{day_idx}_i{i}")
-                        
-                        model.AddBoolAnd([time_slot.Not(), next_time_slot]).OnlyEnforceIf(gap_ends_here)
-                        model.AddBoolOr([time_slot, next_time_slot.Not()]).OnlyEnforceIf(gap_ends_here.Not())
-                        
+                    # Reuse pre-computed gap_ends_here (includes 3-condition check)
+                    gap_ends_here = batch_gap_ends_here[(b_idx, day_idx)][i]
+                    if gap_ends_here is not None:
                         violation = model.NewIntVar(0, 100, f"max_gap_viol_b{b_idx}_d{day_idx}_i{i}")
                         model.Add(violation >= vacant_streak - MAX_GAP_SLOTS).OnlyEnforceIf(gap_ends_here)
                         model.Add(violation == 0).OnlyEnforceIf(gap_ends_here.Not())
