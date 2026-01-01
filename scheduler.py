@@ -11,6 +11,7 @@ from collections import defaultdict
 
 # Import debug/export functions from modular files
 from export_debug import write_solver_diagnostics, print_ghost_grid_debug, print_all_meetings_debug
+from solver_callback import SolutionPrinterCallback
 
 # ============================================================================
 # SOLVER DIAGNOSTICS CONFIGURATION
@@ -32,183 +33,7 @@ SHOW_OPTIMIZATION_LOGS = True      # Show detailed progress during solution impr
 _diagnostics_file_path = None
 
 # NOTE: write_solver_diagnostics has been moved to export_debug.py
-
-class SolutionPrinterCallback(cp_model.CpSolverSolutionCallback):
-    """Prints intermediate solutions with progress metrics and logs to file."""
-
-    def __init__(self, total_penalty, log_file_path=None):
-        cp_model.CpSolverSolutionCallback.__init__(self)
-        self.__solution_count = 0
-        self.__total_penalty = total_penalty
-        self.__previous_penalty = None
-        self.__last_solution_time = None
-        self.__start_time = time.time()
-        self.__log_file_path = log_file_path
-        # Track solver statistics over time
-        self.__last_branches = 0
-        self.__last_conflicts = 0
-        self.__stats_history = []  # List of (time, branches, conflicts, penalty, gap)
-
-        if self.__log_file_path:
-            os.makedirs(os.path.dirname(self.__log_file_path), exist_ok=True)
-            with open(self.__log_file_path, "w", encoding="utf-8") as log_file:
-                log_file.write("=== Solution Log ===\n")
-                log_file.write(f"Started: {datetime.now().isoformat()}\n")
-                log_file.write("--------------------\n")
-
-    def on_solution_callback(self):
-        self.__solution_count += 1
-        current_penalty = self.Value(self.__total_penalty)
-        current_time = time.time()
-        
-        elapsed_total = current_time - self.__start_time
-        
-        # Get current solver statistics
-        current_branches = self.NumBranches()
-        current_conflicts = self.NumConflicts()
-        current_bound = self.BestObjectiveBound()
-        current_gap = abs(current_penalty - current_bound) if current_bound else 0
-        gap_percent = (current_gap / max(abs(current_penalty), 1)) * 100 if current_penalty != 0 else 0
-        
-        hours = int(elapsed_total // 3600)
-        minutes = int((elapsed_total % 3600) // 60)
-        seconds = int(elapsed_total % 60)
-
-        time_parts = []
-        if hours > 0:
-            time_parts.append(f"{hours}h")
-        if minutes > 0:
-            time_parts.append(f"{minutes}m")
-        time_parts.append(f"{seconds}s")  # always show seconds
-
-        elapsed_str = " ".join(time_parts)
-
-        output = f"Solution {self.__solution_count}, penalty = {current_penalty}, time = {elapsed_str}"
-        
-        # Calculate delta statistics since last solution
-        delta_branches = current_branches - self.__last_branches
-        delta_conflicts = current_conflicts - self.__last_conflicts
-        
-        if self.__previous_penalty is not None and self.__last_solution_time is not None:
-            penalty_decrease = self.__previous_penalty - current_penalty
-            time_diff = current_time - self.__last_solution_time
-            ratio = penalty_decrease / time_diff if time_diff > 0 else 0
-            branches_per_sec = delta_branches / time_diff if time_diff > 0 else 0
-            conflicts_per_sec = delta_conflicts / time_diff if time_diff > 0 else 0
-            output += f' (â†“{penalty_decrease} in {time_diff:.1f}s, ratio: {ratio:.1f}/s)'
-            output += f' | br/s: {branches_per_sec:,.0f}, cf/s: {conflicts_per_sec:,.0f}, gap: {gap_percent:.1f}%'
-        else:
-            output += f' | gap: {gap_percent:.1f}%'
-        
-        print(output)
-
-        if self.__log_file_path:
-            with open(self.__log_file_path, "a", encoding="utf-8") as log_file:
-                log_file.write(output + "\n")
-        
-        # Store statistics for analysis
-        self.__stats_history.append({
-            'time': elapsed_total,
-            'solution': self.__solution_count,
-            'penalty': current_penalty,
-            'gap': current_gap,
-            'gap_percent': gap_percent,
-            'total_branches': current_branches,
-            'total_conflicts': current_conflicts,
-            'delta_branches': delta_branches,
-            'delta_conflicts': delta_conflicts,
-        })
-
-        self.__previous_penalty = current_penalty
-        self.__last_solution_time = current_time
-        self.__last_branches = current_branches
-        self.__last_conflicts = current_conflicts
-
-    def solution_count(self):
-        return self.__solution_count
-    
-    def get_stats_history(self):
-        """Return the statistics history for post-solve analysis."""
-        return self.__stats_history
-    
-    def write_stats_summary(self, output_path=None):
-        """Write a summary of solver statistics over time to file."""
-        if not self.__stats_history:
-            return
-        
-        path = output_path or (self.__log_file_path.replace('.txt', '_stats.txt') if self.__log_file_path else 'solver_stats.txt')
-        
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write("=" * 120 + "\n")
-            f.write("SOLVER STATISTICS OVER TIME\n")
-            f.write("=" * 120 + "\n\n")
-            
-            f.write(f"{'Sol#':>5} | {'Time':>8} | {'Penalty':>10} | {'Gap%':>7} | {'Î” Branches':>12} | {'Î” Conflicts':>12} | {'Br/s':>10} | {'Cf/s':>10}\n")
-            f.write("-" * 120 + "\n")
-            
-            prev_time = 0
-            for s in self.__stats_history:
-                time_diff = s['time'] - prev_time
-                br_per_sec = s['delta_branches'] / time_diff if time_diff > 0 else 0
-                cf_per_sec = s['delta_conflicts'] / time_diff if time_diff > 0 else 0
-                
-                f.write(f"{s['solution']:>5} | {s['time']:>7.1f}s | {s['penalty']:>10,} | {s['gap_percent']:>6.1f}% | {s['delta_branches']:>12,} | {s['delta_conflicts']:>12,} | {br_per_sec:>10,.0f} | {cf_per_sec:>10,.0f}\n")
-                prev_time = s['time']
-            
-            f.write("\n" + "=" * 120 + "\n")
-            f.write("PHASE ANALYSIS\n")
-            f.write("=" * 120 + "\n\n")
-            
-            # Analyze phases by branch rate
-            early = [s for s in self.__stats_history if s['time'] < 120]  # First 2 min
-            mid = [s for s in self.__stats_history if 120 <= s['time'] < 300]  # 2-5 min
-            late = [s for s in self.__stats_history if s['time'] >= 300]  # 5+ min
-            
-            def avg_rate(stats, key):
-                if not stats or len(stats) < 2:
-                    return 0
-                total_delta = sum(s[key] for s in stats[1:])  # Skip first (no delta)
-                total_time = stats[-1]['time'] - stats[0]['time']
-                return total_delta / total_time if total_time > 0 else 0
-            
-            f.write(f"Early phase (0-2min):   {len(early):>3} solutions, avg {avg_rate(early, 'delta_branches'):>10,.0f} br/s, {avg_rate(early, 'delta_conflicts'):>10,.0f} cf/s\n")
-            f.write(f"Middle phase (2-5min):  {len(mid):>3} solutions, avg {avg_rate(mid, 'delta_branches'):>10,.0f} br/s, {avg_rate(mid, 'delta_conflicts'):>10,.0f} cf/s\n")
-            f.write(f"Late phase (5min+):     {len(late):>3} solutions, avg {avg_rate(late, 'delta_branches'):>10,.0f} br/s, {avg_rate(late, 'delta_conflicts'):>10,.0f} cf/s\n")
-            
-            # Identify slowdown patterns
-            f.write("\n" + "-" * 120 + "\n")
-            f.write("SLOWDOWN INDICATORS:\n")
-            
-            if late and early:
-                early_rate = avg_rate(early, 'delta_branches')
-                late_rate = avg_rate(late, 'delta_branches')
-                if early_rate > 0 and late_rate > 0:
-                    slowdown = early_rate / late_rate
-                    f.write(f"   Branch rate slowdown: {slowdown:.1f}x slower in late phase\n")
-                    
-                    if slowdown > 10:
-                        f.write("   [CRITICAL] Severe slowdown - likely hitting propagation bottleneck\n")
-                    elif slowdown > 3:
-                        f.write("   [WARNING] Significant slowdown - solver struggling with harder subproblems\n")
-                    else:
-                        f.write("   [OK] Normal slowdown as search space narrows\n")
-            
-            # Check for plateau (many solutions with small improvements)
-            if len(self.__stats_history) > 10:
-                last_10 = self.__stats_history[-10:]
-                avg_improvement = sum(
-                    (last_10[i-1]['penalty'] - last_10[i]['penalty']) 
-                    for i in range(1, len(last_10))
-                ) / (len(last_10) - 1)
-                time_span = last_10[-1]['time'] - last_10[0]['time']
-                
-                f.write(f"\n   Last 10 solutions: avg improvement {avg_improvement:.0f} over {time_span:.0f}s\n")
-                if avg_improvement < 100 and time_span > 60:
-                    f.write("   [WARNING] Plateau detected - small improvements taking long time\n")
-                    f.write("   Consider: symmetry breaking, LNS parameters, or objective decomposition\n")
-        
-        print(f"[Stats] Detailed statistics written to: {path}")
-
+# NOTE: SolutionPrinterCallback has been moved to solver_callback.py
 # NOTE: print_ghost_grid_debug has been moved to export_debug.py
 # NOTE: print_all_meetings_debug has been moved to export_debug.py
 # NOTE: print_raw_violations has been moved to export_reports.py
@@ -244,7 +69,7 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
     if TIME_GRANULARITY not in [10, 30]:
         raise ValueError(f"TIME_GRANULARITY_MINUTES must be 10 or 30, got {TIME_GRANULARITY}")
     
-    print(f"â±ï¸  Time Granularity: {TIME_GRANULARITY} minutes")
+    print(f"⏱️  Time Granularity: {TIME_GRANULARITY} minutes")
     
     model = cp_model.CpModel()
 
@@ -357,7 +182,7 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
                 start_var = model.NewIntVarFromDomain(start_domain, f"start_{sub.subject_id}_s{s}_d{d_idx}")
                 
                 # Calculate duration domain from min/max meetings
-                # Duration domain = {0} âˆª {required / n for n in range(min_meetings, max_meetings + 1)}
+                # Duration domain = {0} ∪ {required / n for n in range(min_meetings, max_meetings + 1)}
                 # Note: Don't restrict to discrete values - allow flexible durations for solver
                 if sub.max_meetings == 0:
                     # Subject has no meetings - only 0 is allowed
@@ -384,7 +209,7 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
                             break
                     use_discrete_durations = True
                 else:
-                    # No min/max defined â€” require explicit min/max values
+                    # No min/max defined — require explicit min/max values
                     raise ValueError(
                         f"Subject {sub.subject_id} (required_weekly_minutes={sub.required_weekly_minutes}) "
                         "must define both 'min_meetings' and 'max_meetings'. The fallback behavior was removed; "
@@ -647,8 +472,8 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
                 # TimeSlots[i] = Matter (1) or Void (0)
                 # Inverter: TimeSlots[i] = NOT(GhostActive[i])
                 time_slot = model.NewBoolVar(f"timeslot_f{f_idx}_d{day_idx}_s{slot_idx}")
-                model.Add(time_slot == 1).OnlyEnforceIf(ghost_active.Not())  # Ghost killed â†’ Matter
-                model.Add(time_slot == 0).OnlyEnforceIf(ghost_active)        # Ghost alive â†’ Void
+                model.Add(time_slot == 1).OnlyEnforceIf(ghost_active.Not())  # Ghost killed → Matter
+                model.Add(time_slot == 0).OnlyEnforceIf(ghost_active)        # Ghost alive → Void
                 
                 ghost_slots.append({
                     "slot_idx": slot_idx,
@@ -705,9 +530,9 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
     # Print Ghost Blocks variable count
     total_faculty_ghost_vars = len(faculty) * len(config["SCHEDULING_DAYS"]) * calculate_slots_for_day(0, config) * 3
     total_batch_ghost_vars = len(batches) * len(config["SCHEDULING_DAYS"]) * calculate_slots_for_day(0, config) * 3
-    print(f"ðŸ‘» Ghost Blocks created:")
-    print(f"   Faculty: {len(faculty)} Ã— {len(config['SCHEDULING_DAYS'])} days Ã— {calculate_slots_for_day(0, config)} slots Ã— 3 vars = ~{total_faculty_ghost_vars:,} variables")
-    print(f"   Batches: {len(batches)} Ã— {len(config['SCHEDULING_DAYS'])} days Ã— {calculate_slots_for_day(0, config)} slots Ã— 3 vars = ~{total_batch_ghost_vars:,} variables")
+    print(f"👻 Ghost Blocks created:")
+    print(f"   Faculty: {len(faculty)} × {len(config['SCHEDULING_DAYS'])} days × {calculate_slots_for_day(0, config)} slots × 3 vars = ~{total_faculty_ghost_vars:,} variables")
+    print(f"   Batches: {len(batches)} × {len(config['SCHEDULING_DAYS'])} days × {calculate_slots_for_day(0, config)} slots × 3 vars = ~{total_batch_ghost_vars:,} variables")
     print(f"   Total Ghost variables: ~{total_faculty_ghost_vars + total_batch_ghost_vars:,}")
 
 #================================== END OF GHOST BLOCKS - VARIABLE CREATION ==================================
@@ -930,7 +755,7 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
                 pop_s = model.NewIntVar(0, batch.population, f"subject_section_batch_population_{sub.subject_id}_s{s}_b{b_idx}")
                 model.Add(pop_s == section_assignments[(sub.subject_id, s, b_idx)])
                 y_s = model.NewBoolVar(f"full_batch_pick_{sub.subject_id}_s{s}_b{b_idx}")
-                # y_s â†” (pop_s == batch.population)
+                # y_s ↔ (pop_s == batch.population)
                 model.Add(pop_s == batch.population).OnlyEnforceIf(y_s)
                 model.Add(pop_s != batch.population).OnlyEnforceIf(y_s.Not())
                 # If not chosen, force zero (prevents partials)
@@ -1096,7 +921,7 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
                     )
                     faculty_intervals.append(faculty_interval)
         
-        # âš¡ GHOST COLLISION: Add ghost intervals for each day
+        # ⚡ GHOST COLLISION: Add ghost intervals for each day
         for day_idx in range(len(config["SCHEDULING_DAYS"])):
             ghost_slots = faculty_ghost_grid[(f_idx, day_idx)]
             for ghost_slot in ghost_slots:
@@ -1171,7 +996,7 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
                     )
                     batch_intervals.append(batch_interval)
         
-        # âš¡ GHOST COLLISION: Add ghost intervals for each day
+        # ⚡ GHOST COLLISION: Add ghost intervals for each day
         for day_idx in range(len(config["SCHEDULING_DAYS"])):
             ghost_slots = batch_ghost_grid[(b_idx, day_idx)]
             for ghost_slot in ghost_slots:
@@ -1281,7 +1106,7 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
             
             model.Add(total_ghost_minutes + total_class_minutes == total_available_minutes)
     
-    print(f"âš¡ Physics Engine activated:")
+    print(f"⚡ Physics Engine activated:")
     print(f"   Collision: Ghost intervals added to NoOverlap constraints")
     print(f"   Conservation: {len(faculty) * len(config['SCHEDULING_DAYS']) + len(batches) * len(config['SCHEDULING_DAYS'])} checksum constraints")
 
@@ -1340,8 +1165,8 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
             #   - Set to 0: No minimum (only prevents zero-duration assignments via has_zero_duration above)
             #   - Set to sub.required_weekly_minutes: Force complete hours for real faculty/room
             #   - Set to any value in between: Partial threshold
-            MIN_DURATION_FOR_REAL_FACULTY = 1  # â† CHANGE THIS to set minimum duration
-            MIN_DURATION_FOR_REAL_ROOM = 1   # â† CHANGE THIS to set minimum duration
+            MIN_DURATION_FOR_REAL_FACULTY = 1  # ← CHANGE THIS to set minimum duration
+            MIN_DURATION_FOR_REAL_ROOM = 1   # ← CHANGE THIS to set minimum duration
             
             if MIN_DURATION_FOR_REAL_FACULTY > 0:
                 # If assigned to real faculty (not dummy), total_duration must meet threshold
@@ -1349,7 +1174,7 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
                 model.Add(assigned_faculty[key] != DUMMY_FACULTY_IDX).OnlyEnforceIf(has_real_faculty)
                 model.Add(assigned_faculty[key] == DUMMY_FACULTY_IDX).OnlyEnforceIf(has_real_faculty.Not())
                 
-                # Real faculty â†’ total_duration >= MIN_DURATION_FOR_REAL_FACULTY
+                # Real faculty → total_duration >= MIN_DURATION_FOR_REAL_FACULTY
                 model.Add(total_duration >= MIN_DURATION_FOR_REAL_FACULTY).OnlyEnforceIf(has_real_faculty)
             
             if MIN_DURATION_FOR_REAL_ROOM > 0:
@@ -1358,7 +1183,7 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
                 model.Add(assigned_room[key] != DUMMY_ROOM_IDX).OnlyEnforceIf(has_real_room)
                 model.Add(assigned_room[key] == DUMMY_ROOM_IDX).OnlyEnforceIf(has_real_room.Not())
                 
-                # Real room â†’ total_duration >= MIN_DURATION_FOR_REAL_ROOM
+                # Real room → total_duration >= MIN_DURATION_FOR_REAL_ROOM
                 model.Add(total_duration >= MIN_DURATION_FOR_REAL_ROOM).OnlyEnforceIf(has_real_room)
             
             duration_violations[key] = actual_duration_violation
@@ -1787,17 +1612,17 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
             except Exception as e:
                 f.write(f"\nError generating statistics: {e}\n")
         
-        print(f"ðŸ“Š Model statistics saved to: {model_stats_file}")
+        print(f"📊 Model statistics saved to: {model_stats_file}")
         sys.stdout.flush()
     # Try to validate the model before solving
-    print("ðŸ” Validating model...")
+    print("🔍 Validating model...")
     sys.stdout.flush()
     try:
         model_str = model.Proto()  # This will fail if model has issues
-        print(f"âœ“ Model proto generated successfully")
+        print(f"✓ Model proto generated successfully")
         sys.stdout.flush()
     except Exception as e:
-        print(f"âŒ Model validation failed: {e}")
+        print(f"❌ Model validation failed: {e}")
         import traceback
         traceback.print_exc()
         sys.stdout.flush()
@@ -1824,7 +1649,7 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
                 f.write(msg + '\n')
         
         solver.log_callback = log_callback
-        print(f"ðŸ“ Solver logs will be saved to: {solver_log_file}")
+        print(f"📝 Solver logs will be saved to: {solver_log_file}")
     
     # PASS 1: MINIMIZE STRUCTURAL VIOLATIONS
     if pass_mode in ["pass1", "full"]:
