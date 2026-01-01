@@ -1,0 +1,48 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+.eggs/
+*.egg-info/
+
+# Virtual environments
+venv/
+.env/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+
+# Project-generated folders / large artifacts
+outputs/
+data/
+Sample Datas/
+
+# Output and reports - exclude generated results and large files
+*.txt
+!requirements.txt
+raw_violations.xlsx
+slot_grid_output.txt
+violation_report.txt
+1/slot_grid_output.txt
+1/violation_report.txt
+
+# Data folder: keep raw csvs, but if you want to exclude some generated csvs, add them here
+# data/
+
+# Logs
+*.log
+
+# Personal configs
+.env
+
+# Other
+*.sqlite3
