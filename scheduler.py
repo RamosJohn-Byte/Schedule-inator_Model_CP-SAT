@@ -9,9 +9,12 @@ from ortools.sat.python import cp_model
 import math
 from collections import defaultdict
 
-# Import debug/export functions from modular files
-from export_debug import write_solver_diagnostics, print_ghost_grid_debug, print_all_meetings_debug
-from solver_callback import SolutionPrinterCallback
+# Timeslot System Imports
+from timeslot_system.timeslot_grid import create_timeslot_grid_data
+from timeslot_system.controllers.ghostblock_controller import apply_ghostblock_controller
+from timeslot_system.streak_tracker import add_streak_tracking
+from timeslot_system.timeslot_constraints import add_hard_constraints, add_soft_constraints
+from timeslot_system.debug.ghost_grid_exporter import print_ghost_grid_debug as ghost_grid_debug
 
 # ============================================================================
 # SOLVER DIAGNOSTICS CONFIGURATION
@@ -22,15 +25,725 @@ ENABLE_SOLVER_DIAGNOSTICS = False  # Set to False to disable diagnostic output
 # SOLVER LOGGING CONFIGURATION (Granular Control)
 # ============================================================================
 # Each toggle controls a specific phase of the solver's activity
-SHOW_MODEL_STATISTICS = True        # Print model size (variables, constraints) before solving
-SHOW_PRESOLVE_LOGS = False          # Show presolve phase (constraint propagation, simplification)
-SHOW_SEARCH_LOGS = False            # Show search phase (branching, conflicts, restarts)
-SHOW_SOLUTION_LOGS = False          # Show when intermediate solutions are found
-SHOW_OPTIMIZATION_LOGS = True       # Show detailed progress during solution improvement
+SHOW_MODEL_STATISTICS = True       # Print model size (variables, constraints) before solving
+SHOW_PRESOLVE_LOGS = True          # Show presolve phase (constraint propagation, simplification)
+SHOW_SEARCH_LOGS = True            # Show search phase (branching, conflicts, restarts)
+SHOW_SOLUTION_LOGS = True          # Show when intermediate solutions are found
+SHOW_OPTIMIZATION_LOGS = True      # Show detailed progress during solution improvement
 # ============================================================================
 
 # Global variable to store diagnostics file path (set by run_scheduler)
 _diagnostics_file_path = None
+
+def write_solver_diagnostics(solver, model, status, pass_name="", output_dir=None):
+    """
+    Write comprehensive solver diagnostics to a file for later review.
+    Shows search statistics, efficiency metrics, and interpretation.
+    
+    Args:
+        solver: CpSolver instance after solving
+        model: CpModel instance
+        status: Solve status code
+        pass_name: Name of the pass (e.g., "PASS 1", "PASS 2")
+        output_dir: Directory to write diagnostics file (uses global if None)
+    """
+    if not ENABLE_SOLVER_DIAGNOSTICS:
+        return
+    
+    global _diagnostics_file_path
+    
+    # Determine output file path
+    if output_dir:
+        diagnostics_path = os.path.join(output_dir, "solver_diagnostics.txt")
+        _diagnostics_file_path = diagnostics_path
+    elif _diagnostics_file_path:
+        diagnostics_path = _diagnostics_file_path
+    else:
+        diagnostics_path = "solver_diagnostics.txt"
+    
+    # Ensure directory exists
+    os.makedirs(os.path.dirname(diagnostics_path) if os.path.dirname(diagnostics_path) else ".", exist_ok=True)
+    
+    # Build the diagnostics report as a list of lines
+    lines = []
+    
+    lines.append("")
+    lines.append("=" * 100)
+    lines.append(f"SOLVER DIAGNOSTICS - {pass_name}")
+    lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("=" * 100)
+    
+    # ==================== BASIC STATISTICS ====================
+    lines.append("")
+    lines.append("BASIC STATISTICS:")
+    lines.append(f"   Status:              {solver.StatusName(status)}")
+    lines.append(f"   Wall time:           {solver.WallTime():.2f} seconds")
+    lines.append(f"   User time:           {solver.UserTime():.2f} seconds")
+    
+    # ==================== SEARCH STATISTICS ====================
+    lines.append("")
+    lines.append("SEARCH STATISTICS:")
+    lines.append(f"   Branches:            {solver.NumBranches():,}")
+    lines.append(f"   Conflicts:           {solver.NumConflicts():,}")
+    
+    # ==================== OBJECTIVE INFORMATION ====================
+    if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+        obj_value = solver.ObjectiveValue()
+        best_bound = solver.BestObjectiveBound()
+        gap = abs(obj_value - best_bound)
+        gap_percent = (gap / max(abs(obj_value), 1)) * 100 if obj_value != 0 else 0
+        
+        lines.append("")
+        lines.append("OBJECTIVE:")
+        lines.append(f"   Current value:       {obj_value:,}")
+        lines.append(f"   Best bound:          {best_bound:,}")
+        lines.append(f"   Gap:                 {gap:,} ({gap_percent:.2f}%)")
+        
+        if status == cp_model.OPTIMAL:
+            lines.append(f"   [OPTIMAL] - Proven best solution!")
+        else:
+            lines.append(f"   [FEASIBLE] - Not proven optimal")
+            lines.append(f"   Need to close gap of {gap:,} to prove optimality")
+    
+    # ==================== MODEL SIZE ====================
+    lines.append("")
+    lines.append("MODEL SIZE:")
+    proto = model.Proto()
+    lines.append(f"   Variables:           {len(proto.variables):,}")
+    lines.append(f"   Constraints:         {len(proto.constraints):,}")
+    
+    # Count constraint types
+    constraint_types = {}
+    for c in proto.constraints:
+        c_type = c.WhichOneof('constraint')
+        constraint_types[c_type] = constraint_types.get(c_type, 0) + 1
+    
+    lines.append("")
+    lines.append("   Constraint breakdown:")
+    for c_type, count in sorted(constraint_types.items(), key=lambda x: -x[1])[:15]:
+        lines.append(f"      {c_type}: {count:,}")
+    
+    # ==================== EFFICIENCY METRICS ====================
+    if solver.WallTime() > 0:
+        branches_per_sec = solver.NumBranches() / solver.WallTime()
+        conflicts_per_sec = solver.NumConflicts() / solver.WallTime()
+        
+        lines.append("")
+        lines.append("EFFICIENCY METRICS:")
+        lines.append(f"   Branches/second:     {branches_per_sec:,.0f}")
+        lines.append(f"   Conflicts/second:    {conflicts_per_sec:,.0f}")
+        
+        # Conflict ratio
+        if solver.NumBranches() > 0:
+            conflict_ratio = solver.NumConflicts() / solver.NumBranches() * 100
+            lines.append(f"   Conflict ratio:      {conflict_ratio:.2f}%")
+    
+    # ==================== INTERPRETATION ====================
+    lines.append("")
+    lines.append("INTERPRETATION:")
+    
+    if solver.WallTime() > 0:
+        conflicts_per_sec = solver.NumConflicts() / solver.WallTime()
+        branches_per_sec = solver.NumBranches() / solver.WallTime()
+        
+        # Conflict rate interpretation
+        if conflicts_per_sec < 100:
+            lines.append(f"   [WARNING] Very low conflict rate ({conflicts_per_sec:.0f}/s) - solver may be stuck")
+            lines.append(f"       Possible causes: complex propagation, weak bounds")
+        elif conflicts_per_sec < 1000:
+            lines.append(f"   [INFO] Low conflict rate ({conflicts_per_sec:.0f}/s) - heavy propagation per conflict")
+        elif conflicts_per_sec > 50000:
+            lines.append(f"   [WARNING] Very high conflict rate ({conflicts_per_sec:.0f}/s) - may be thrashing")
+            lines.append(f"       Possible causes: tightly coupled constraints, poor search heuristics")
+        else:
+            lines.append(f"   [OK] Normal conflict rate ({conflicts_per_sec:.0f}/s)")
+        
+        # Branch rate interpretation
+        if branches_per_sec < 1000:
+            lines.append(f"   [WARNING] Low branch rate ({branches_per_sec:.0f}/s) - slow constraint evaluation")
+        elif branches_per_sec > 100000:
+            lines.append(f"   [OK] High branch rate ({branches_per_sec:.0f}/s) - efficient search")
+        else:
+            lines.append(f"   [OK] Moderate branch rate ({branches_per_sec:.0f}/s)")
+    
+    # Status-specific interpretation
+    if status == cp_model.FEASIBLE:
+        lines.append("")
+        lines.append("WHY NOT OPTIMAL?")
+        lines.append("   The solver found a solution but couldn't prove it's the best.")
+        lines.append("   Possible reasons:")
+        lines.append("   1. Time limit reached before proof completed")
+        lines.append("   2. Model has too many variables/constraints for quick proof")
+        lines.append("   3. Objective function has many near-optimal solutions")
+        lines.append("   4. Large gap between current solution and lower bound")
+        if solver.WallTime() > 0:
+            gap = abs(solver.ObjectiveValue() - solver.BestObjectiveBound())
+            if gap > 0:
+                time_per_gap = solver.WallTime() / max(1, gap)
+                lines.append(f"")
+                lines.append(f"   Estimated time to close gap: ~{gap * time_per_gap / 60:.1f} more minutes")
+    
+    lines.append("=" * 100)
+    lines.append("")
+    
+    # Write to file (append mode to capture both passes)
+    with open(diagnostics_path, "a", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    
+    # Also print a brief summary to terminal
+    print(f"\n[Diagnostics] {pass_name}: {solver.StatusName(status)} in {solver.WallTime():.2f}s")
+    if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+        gap = abs(solver.ObjectiveValue() - solver.BestObjectiveBound())
+        print(f"[Diagnostics] Objective: {solver.ObjectiveValue():,} | Gap: {gap:,} | Branches: {solver.NumBranches():,}")
+    print(f"[Diagnostics] Full report saved to: {diagnostics_path}")
+
+class SolutionPrinterCallback(cp_model.CpSolverSolutionCallback):
+    """Prints intermediate solutions with progress metrics and logs to file."""
+
+    def __init__(self, total_penalty, log_file_path=None):
+        cp_model.CpSolverSolutionCallback.__init__(self)
+        self.__solution_count = 0
+        self.__total_penalty = total_penalty
+        self.__previous_penalty = None
+        self.__last_solution_time = None
+        self.__start_time = time.time()
+        self.__log_file_path = log_file_path
+        # Track solver statistics over time
+        self.__last_branches = 0
+        self.__last_conflicts = 0
+        self.__stats_history = []  # List of (time, branches, conflicts, penalty, gap)
+
+        if self.__log_file_path:
+            os.makedirs(os.path.dirname(self.__log_file_path), exist_ok=True)
+            with open(self.__log_file_path, "w", encoding="utf-8") as log_file:
+                log_file.write("=== Solution Log ===\n")
+                log_file.write(f"Started: {datetime.now().isoformat()}\n")
+                log_file.write("--------------------\n")
+
+    def on_solution_callback(self):
+        self.__solution_count += 1
+        current_penalty = self.Value(self.__total_penalty)
+        current_time = time.time()
+        
+        elapsed_total = current_time - self.__start_time
+        
+        # Get current solver statistics
+        current_branches = self.NumBranches()
+        current_conflicts = self.NumConflicts()
+        current_bound = self.BestObjectiveBound()
+        current_gap = abs(current_penalty - current_bound) if current_bound else 0
+        gap_percent = (current_gap / max(abs(current_penalty), 1)) * 100 if current_penalty != 0 else 0
+        
+        hours = int(elapsed_total // 3600)
+        minutes = int((elapsed_total % 3600) // 60)
+        seconds = int(elapsed_total % 60)
+
+        time_parts = []
+        if hours > 0:
+            time_parts.append(f"{hours}h")
+        if minutes > 0:
+            time_parts.append(f"{minutes}m")
+        time_parts.append(f"{seconds}s")  # always show seconds
+
+        elapsed_str = " ".join(time_parts)
+
+        output = f"Solution {self.__solution_count}, penalty = {current_penalty}, time = {elapsed_str}"
+        
+        # Calculate delta statistics since last solution
+        delta_branches = current_branches - self.__last_branches
+        delta_conflicts = current_conflicts - self.__last_conflicts
+        
+        if self.__previous_penalty is not None and self.__last_solution_time is not None:
+            penalty_decrease = self.__previous_penalty - current_penalty
+            time_diff = current_time - self.__last_solution_time
+            ratio = penalty_decrease / time_diff if time_diff > 0 else 0
+            branches_per_sec = delta_branches / time_diff if time_diff > 0 else 0
+            conflicts_per_sec = delta_conflicts / time_diff if time_diff > 0 else 0
+            output += f' (↓{penalty_decrease} in {time_diff:.1f}s, ratio: {ratio:.1f}/s)'
+            output += f' | br/s: {branches_per_sec:,.0f}, cf/s: {conflicts_per_sec:,.0f}, gap: {gap_percent:.1f}%'
+        else:
+            output += f' | gap: {gap_percent:.1f}%'
+        
+        print(output)
+
+        if self.__log_file_path:
+            with open(self.__log_file_path, "a", encoding="utf-8") as log_file:
+                log_file.write(output + "\n")
+        
+        # Store statistics for analysis
+        self.__stats_history.append({
+            'time': elapsed_total,
+            'solution': self.__solution_count,
+            'penalty': current_penalty,
+            'gap': current_gap,
+            'gap_percent': gap_percent,
+            'total_branches': current_branches,
+            'total_conflicts': current_conflicts,
+            'delta_branches': delta_branches,
+            'delta_conflicts': delta_conflicts,
+        })
+
+        self.__previous_penalty = current_penalty
+        self.__last_solution_time = current_time
+        self.__last_branches = current_branches
+        self.__last_conflicts = current_conflicts
+
+    def solution_count(self):
+        return self.__solution_count
+    
+    def get_stats_history(self):
+        """Return the statistics history for post-solve analysis."""
+        return self.__stats_history
+    
+    def write_stats_summary(self, output_path=None):
+        """Write a summary of solver statistics over time to file."""
+        if not self.__stats_history:
+            return
+        
+        path = output_path or (self.__log_file_path.replace('.txt', '_stats.txt') if self.__log_file_path else 'solver_stats.txt')
+        
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write("=" * 120 + "\n")
+            f.write("SOLVER STATISTICS OVER TIME\n")
+            f.write("=" * 120 + "\n\n")
+            
+            f.write(f"{'Sol#':>5} | {'Time':>8} | {'Penalty':>10} | {'Gap%':>7} | {'Δ Branches':>12} | {'Δ Conflicts':>12} | {'Br/s':>10} | {'Cf/s':>10}\n")
+            f.write("-" * 120 + "\n")
+            
+            prev_time = 0
+            for s in self.__stats_history:
+                time_diff = s['time'] - prev_time
+                br_per_sec = s['delta_branches'] / time_diff if time_diff > 0 else 0
+                cf_per_sec = s['delta_conflicts'] / time_diff if time_diff > 0 else 0
+                
+                f.write(f"{s['solution']:>5} | {s['time']:>7.1f}s | {s['penalty']:>10,} | {s['gap_percent']:>6.1f}% | {s['delta_branches']:>12,} | {s['delta_conflicts']:>12,} | {br_per_sec:>10,.0f} | {cf_per_sec:>10,.0f}\n")
+                prev_time = s['time']
+            
+            f.write("\n" + "=" * 120 + "\n")
+            f.write("PHASE ANALYSIS\n")
+            f.write("=" * 120 + "\n\n")
+            
+            # Analyze phases by branch rate
+            early = [s for s in self.__stats_history if s['time'] < 120]  # First 2 min
+            mid = [s for s in self.__stats_history if 120 <= s['time'] < 300]  # 2-5 min
+            late = [s for s in self.__stats_history if s['time'] >= 300]  # 5+ min
+            
+            def avg_rate(stats, key):
+                if not stats or len(stats) < 2:
+                    return 0
+                total_delta = sum(s[key] for s in stats[1:])  # Skip first (no delta)
+                total_time = stats[-1]['time'] - stats[0]['time']
+                return total_delta / total_time if total_time > 0 else 0
+            
+            f.write(f"Early phase (0-2min):   {len(early):>3} solutions, avg {avg_rate(early, 'delta_branches'):>10,.0f} br/s, {avg_rate(early, 'delta_conflicts'):>10,.0f} cf/s\n")
+            f.write(f"Middle phase (2-5min):  {len(mid):>3} solutions, avg {avg_rate(mid, 'delta_branches'):>10,.0f} br/s, {avg_rate(mid, 'delta_conflicts'):>10,.0f} cf/s\n")
+            f.write(f"Late phase (5min+):     {len(late):>3} solutions, avg {avg_rate(late, 'delta_branches'):>10,.0f} br/s, {avg_rate(late, 'delta_conflicts'):>10,.0f} cf/s\n")
+            
+            # Identify slowdown patterns
+            f.write("\n" + "-" * 120 + "\n")
+            f.write("SLOWDOWN INDICATORS:\n")
+            
+            if late and early:
+                early_rate = avg_rate(early, 'delta_branches')
+                late_rate = avg_rate(late, 'delta_branches')
+                if early_rate > 0 and late_rate > 0:
+                    slowdown = early_rate / late_rate
+                    f.write(f"   Branch rate slowdown: {slowdown:.1f}x slower in late phase\n")
+                    
+                    if slowdown > 10:
+                        f.write("   [CRITICAL] Severe slowdown - likely hitting propagation bottleneck\n")
+                    elif slowdown > 3:
+                        f.write("   [WARNING] Significant slowdown - solver struggling with harder subproblems\n")
+                    else:
+                        f.write("   [OK] Normal slowdown as search space narrows\n")
+            
+            # Check for plateau (many solutions with small improvements)
+            if len(self.__stats_history) > 10:
+                last_10 = self.__stats_history[-10:]
+                avg_improvement = sum(
+                    (last_10[i-1]['penalty'] - last_10[i]['penalty']) 
+                    for i in range(1, len(last_10))
+                ) / (len(last_10) - 1)
+                time_span = last_10[-1]['time'] - last_10[0]['time']
+                
+                f.write(f"\n   Last 10 solutions: avg improvement {avg_improvement:.0f} over {time_span:.0f}s\n")
+                if avg_improvement < 100 and time_span > 60:
+                    f.write("   [WARNING] Plateau detected - small improvements taking long time\n")
+                    f.write("   Consider: symmetry breaking, LNS parameters, or objective decomposition\n")
+        
+        print(f"[Stats] Detailed statistics written to: {path}")
+
+# Note: print_ghost_grid_debug function has been moved to timeslot_system/debug/ghost_grid_exporter.py
+# It is imported at the top of this file as ghost_grid_debug
+
+
+def print_all_meetings_debug(meetings, assigned_faculty, assigned_room, section_assignments, 
+                              faculty, rooms, batches, subjects_map, config, solver,
+                              output_dir=None, pass_name=""):
+    """
+    Exports all meetings (active and inactive) in a scannable table format.
+    Each row is a subject/section showing duration for each day.
+    
+    Args:
+        meetings: Dict of (subject_id, section, day) -> meeting info
+        assigned_faculty: Dict of (subject_id, section) -> faculty index
+        assigned_room: Dict of (subject_id, section) -> room index
+        section_assignments: Dict of (subject_id, section, batch_idx) -> student count
+        faculty: List of faculty objects
+        rooms: List of room objects
+        batches: List of batch objects
+        subjects_map: Dict of subject_id -> Subject object
+        config: Configuration dict
+        solver: CP-SAT solver instance
+        output_dir: Directory to write file
+        pass_name: Name of the pass (e.g., "pass1", "pass2")
+    """
+    filename = f"all_meetings_{pass_name}.txt" if pass_name else "all_meetings.txt"
+    if output_dir:
+        filepath = os.path.join(output_dir, filename)
+    else:
+        filepath = filename
+    
+    DUMMY_FACULTY_IDX = len(faculty)
+    DUMMY_ROOM_IDX = len(rooms)
+    
+    # Group meetings by subject and section
+    meetings_by_section = {}
+    for (sub_id, s, d_idx), mtg in meetings.items():
+        key = (sub_id, s)
+        if key not in meetings_by_section:
+            meetings_by_section[key] = {}
+        meetings_by_section[key][d_idx] = mtg
+    
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write("=" * 180 + "\n")
+        f.write(f"ALL MEETINGS OVERVIEW - {pass_name.upper()}\n")
+        f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("=" * 180 + "\n\n")
+        
+        # Header
+        day_names = config["SCHEDULING_DAYS"]
+        f.write(f"{'Subject':>12s} | {'Sec':>3s} | ")
+        for day in day_names:
+            f.write(f"{day[:3]:>8s} | ")
+        f.write(f"{'Faculty':>20s} | {'Status':>6s}\n")
+        
+        f.write(f"{'-'*12} | {'-'*3} | ")
+        for _ in day_names:
+            f.write(f"{'-'*8} | ")
+        f.write(f"{'-'*20} | {'-'*6}\n")
+        
+        # Data rows
+        total_sections = 0
+        sections_with_meetings = 0
+        
+        for (sub_id, s), day_meetings in sorted(meetings_by_section.items()):
+            total_sections += 1
+            subject = subjects_map.get(sub_id)
+            
+            # Get assigned faculty
+            faculty_idx = solver.Value(assigned_faculty[(sub_id, s)])
+            if faculty_idx == DUMMY_FACULTY_IDX:
+                faculty_name = "UNASSIGNED"
+            else:
+                faculty_name = faculty[faculty_idx].name
+            
+            # Collect durations for each day
+            durations = []
+            has_active_meeting = False
+            
+            for d_idx in range(len(day_names)):
+                if d_idx in day_meetings:
+                    mtg = day_meetings[d_idx]
+                    is_active = solver.Value(mtg["is_active"])
+                    
+                    if is_active:
+                        duration = solver.Value(mtg["duration"])
+                        durations.append(duration)
+                        has_active_meeting = True
+                    else:
+                        durations.append(0)
+                else:
+                    durations.append(0)
+            
+            if has_active_meeting:
+                sections_with_meetings += 1
+                status = "has!"
+            else:
+                status = "none!"
+            
+            # Write row
+            f.write(f"{str(sub_id):>12s} | {s:>3d} | ")
+            for dur in durations:
+                f.write(f"{dur:>8d} | ")
+            f.write(f"{faculty_name:>20s} | {status:>6s}\n")
+        
+        f.write("\n" + "=" * 180 + "\n")
+        
+        # Summary statistics
+        total_meetings = len(meetings)
+        active_meetings = sum(1 for mtg in meetings.values() if solver.Value(mtg["is_active"]) == 1)
+        inactive_meetings = total_meetings - active_meetings
+        
+        f.write(f"\nSUMMARY:\n")
+        f.write(f"  Total Sections:           {total_sections}\n")
+        f.write(f"  Sections with Meetings:   {sections_with_meetings}\n")
+        f.write(f"  Sections without Meetings: {total_sections - sections_with_meetings}\n")
+        f.write(f"  Total Meeting Slots:      {total_meetings}\n")
+        f.write(f"  Active Meetings:          {active_meetings}\n")
+        f.write(f"  Inactive Meetings:        {inactive_meetings}\n")
+        f.write(f"\n" + "=" * 180 + "\n")
+    
+    print(f"[Meeting Debug] {pass_name} exported to: {filepath}")
+
+
+def print_raw_violations(solver, results, faculty, batches, config, print_to_terminal=True, save_to_file=True, filename="violations_report.xlsx"):
+    """
+    Analyzes and reports all constraint violations in two categories:
+    1. STRUCTURAL VIOLATIONS (boolean slack variables from Pass 1)
+    2. SOFT CONSTRAINT PENALTIES (integer penalty trackers from Pass 2)
+    
+    - Terminal output shows RAW values of ALL indexes (not just violations)
+    - File output is a multi-sheet Excel file for data analysis
+    
+    Args:
+        solver: CpSolver instance used for evaluation
+        results: dictionary returned by run_scheduler containing violations
+        faculty: list of Faculty objects
+        batches: list of Batch objects
+        config: scheduler configuration dictionary (used for slot-to-time conversion)
+        print_to_terminal: toggle terminal output
+        save_to_file: toggle excel output
+        filename: excel filename
+    """
+    if not print_to_terminal and not save_to_file:
+        print("Violation report generation skipped as both terminal and file outputs are disabled.")
+        return
+
+    structural_terminal_lines = []
+    soft_terminal_lines = []
+    structural_excel_data = collections.defaultdict(list)
+    soft_excel_data = collections.defaultdict(list)
+    
+    if config is None:
+        raise ValueError("config is required to translate slot indices to time.")
+
+    violations = results.get("violations", {})
+    
+    # Get dummy indices for structural violation reporting
+    DUMMY_FACULTY_IDX = results.get("DUMMY_FACULTY_IDX")
+    DUMMY_ROOM_IDX = results.get("DUMMY_ROOM_IDX")
+
+    SLOT_SIZE = 10  # minutes per slot
+    day_start_minutes = config.get("DAY_START_MINUTES", 0)
+
+    def slot_to_time(slot_idx):
+        total_minutes = day_start_minutes + slot_idx * SLOT_SIZE
+        hours = total_minutes // 60
+        minutes = total_minutes % 60
+        period = "AM" if hours % 24 < 12 else "PM"
+        display_hour = hours % 12
+        if display_hour == 0:
+            display_hour = 12
+        return f"{display_hour}:{minutes:02d} {period}"
+
+    # ============================================================================
+    # SECTION 1: STRUCTURAL VIOLATIONS (Boolean Slack Variables from Pass 1)
+    # ============================================================================
+    
+    # 1a. Unassigned Faculty (Dummy Faculty Assignments)
+    v_type = "is_dummy_faculty"
+    dummy_faculty_data = violations.get("is_dummy_faculty", {})
+    for (sub_id, s_idx), var in sorted(dummy_faculty_data.items()):
+        if hasattr(var, 'Proto'):
+            value = solver.Value(var)
+            structural_terminal_lines.append(f"{v_type}: (sub: '{sub_id}', sec: {s_idx}) = {value}")
+            structural_excel_data[v_type].append({"subject_id": sub_id, "section_idx": s_idx, "value": value})
+    
+    # 1b. Unassigned Room (Dummy Room Assignments)
+    v_type = "is_dummy_room"
+    dummy_room_data = violations.get("is_dummy_room", {})
+    for (sub_id, s_idx), var in sorted(dummy_room_data.items()):
+        if hasattr(var, 'Proto'):
+            value = solver.Value(var)
+            structural_terminal_lines.append(f"{v_type}: (sub: '{sub_id}', sec: {s_idx}) = {value}")
+            structural_excel_data[v_type].append({"subject_id": sub_id, "section_idx": s_idx, "value": value})
+    
+    # 1c. Duration Violations (Weekly Hours Shortfall)
+    v_type = "duration_violations"
+    duration_data = violations.get("duration_violations", {})
+    for (sub_id, s_idx), var in sorted(duration_data.items()):
+        if hasattr(var, 'Proto'):
+            value = solver.Value(var)
+            structural_terminal_lines.append(f"{v_type}: (sub: '{sub_id}', sec: {s_idx}) = {value}")
+            structural_excel_data[v_type].append({"subject_id": sub_id, "section_idx": s_idx, "value": value})
+    
+    # 1d. Faculty Day Gaps (structural slack)
+    v_type = "faculty_day_gaps"
+    faculty_day_gap_data = violations.get("faculty_day_gaps", {})
+    for f_idx, flag_list in sorted(faculty_day_gap_data.items()):
+        for day_offset, var in enumerate(flag_list):
+            if hasattr(var, 'Proto'):
+                value = solver.Value(var)
+                # day_offset 0 = day 1 (Tuesday), day_offset 1 = day 2 (Wednesday), day_offset 2 = day 3 (Thursday)
+                actual_day = day_offset + 1
+                structural_terminal_lines.append(f"{v_type}: (f: {f_idx}, day: {actual_day}) = {value}")
+                structural_excel_data[v_type].append({"faculty_idx": f_idx, "day_idx": actual_day, "value": value})
+    
+    # 1e. Batch Day Gaps (structural slack)
+    v_type = "batch_day_gaps"
+    batch_day_gap_data = violations.get("batch_day_gaps", {})
+    for b_idx, flag_list in sorted(batch_day_gap_data.items()):
+        for day_offset, var in enumerate(flag_list):
+            if hasattr(var, 'Proto'):
+                value = solver.Value(var)
+                actual_day = day_offset + 1
+                structural_terminal_lines.append(f"{v_type}: (b: {b_idx}, day: {actual_day}) = {value}")
+                structural_excel_data[v_type].append({"batch_idx": b_idx, "day_idx": actual_day, "value": value})
+
+    # ============================================================================
+    # SECTION 2: SOFT CONSTRAINT PENALTIES (Integer Penalty Trackers from Pass 2)
+    # ============================================================================
+    
+    # 2a. Faculty Overload (minutes over max)
+    v_type = "faculty_overload"
+    for f_idx, var in enumerate(violations.get("faculty_overload", [])):
+        value = solver.Value(var)
+        soft_terminal_lines.append(f"{v_type}: (f: {f_idx}) = {value}")
+        soft_excel_data[v_type].append({"faculty_idx": f_idx, "value": value})
+    
+    # 2a2. Faculty Underfill (minutes under min)
+    v_type = "faculty_underfill"
+    for f_idx, var in enumerate(violations.get("faculty_underfill", [])):
+        value = solver.Value(var)
+        soft_terminal_lines.append(f"{v_type}: (f: {f_idx}) = {value}")
+        soft_excel_data[v_type].append({"faculty_idx": f_idx, "value": value})
+
+    # 2b. Room Overcapacity
+    v_type = "room_overcapacity"
+    for (sub_id, s_idx), var in sorted(violations.get("room_overcapacity", {}).items()):
+        value = solver.Value(var)
+        soft_terminal_lines.append(f"{v_type}: (sub: '{sub_id}', sec: {s_idx}) = {value}")
+        soft_excel_data[v_type].append({"subject_id": sub_id, "section_idx": s_idx, "value": value})
+
+    # 2c. Section Overfill
+    v_type = "section_overfill"
+    for (sub_id, s_idx), var in sorted(violations.get("section_overfill", {}).items()):
+        value = solver.Value(var)
+        soft_terminal_lines.append(f"{v_type}: (sub: '{sub_id}', sec: {s_idx}) = {value}")
+        soft_excel_data[v_type].append({"subject_id": sub_id, "section_idx": s_idx, "value": value})
+
+    # 2d. Section Underfill
+    v_type = "section_underfill"
+    for (sub_id, s_idx), var in sorted(violations.get("section_underfill", {}).items()):
+        value = solver.Value(var)
+        soft_terminal_lines.append(f"{v_type}: (sub: '{sub_id}', sec: {s_idx}) = {value}")
+        soft_excel_data[v_type].append({"subject_id": sub_id, "section_idx": s_idx, "value": value})
+
+    # 2e. Nested soft constraint violations (continuous class, gaps, minimum blocks, non-preferred)
+    nested_soft_violations = {
+        "faculty_excess_gaps": violations.get("faculty_excess_gaps", {}),
+        "batch_excess_gaps": violations.get("batch_excess_gaps", {}),
+        "faculty_under_minimum_block": violations.get("faculty_under_minimum_block", {}),
+        "batch_under_minimum_block": violations.get("batch_under_minimum_block", {}),
+    }
+
+    for v_type, data in sorted(nested_soft_violations.items()):
+        for entity_idx, day_data in sorted(data.items()):
+            for day_idx, slot_vars in sorted(day_data.items()):
+                for slot_idx, var in enumerate(slot_vars):
+                    if hasattr(var, 'Proto'):
+                        value = solver.Value(var)
+                        soft_terminal_lines.append(f"{v_type}: (e: {entity_idx}, d: {day_idx}, s: {slot_idx}) = {value}")
+                        soft_excel_data[v_type].append({
+                            "entity_idx": entity_idx,
+                            "day_idx": day_idx,
+                            "slot_idx": slot_idx,
+                            "slot_time": slot_to_time(slot_idx),
+                            "value": value
+                        })
+
+    # 2f. Non-preferred subject assignments (special nested structure: f_idx -> sub_id -> list)
+    v_type = "faculty_non_preferred_subject"
+    non_pref_data = violations.get("faculty_non_preferred_subject", {})
+    for f_idx, sub_data in sorted(non_pref_data.items()):
+        for sub_id, var_list in sorted(sub_data.items()):
+            for sec_idx, var in enumerate(var_list):
+                if hasattr(var, 'Proto'):
+                    value = solver.Value(var)
+                    soft_terminal_lines.append(f"{v_type}: (f: {f_idx}, sub: '{sub_id}', sec: {sec_idx}) = {value}")
+                    soft_excel_data[v_type].append({
+                        "faculty_idx": f_idx,
+                        "subject_id": sub_id,
+                        "section_idx": sec_idx,
+                        "value": value
+                    })
+
+    # ============================================================================
+    # OUTPUT GENERATION
+    # ============================================================================
+    
+    if save_to_file:
+        # Save structural violations to separate file
+        structural_filename = filename.replace(".xlsx", "_structural.xlsx")
+        soft_filename = filename.replace(".xlsx", "_soft.xlsx")
+        
+        if structural_excel_data:
+            try:
+                with pd.ExcelWriter(structural_filename, engine='openpyxl') as writer:
+                    for v_type, records in sorted(structural_excel_data.items()):
+                        df = pd.DataFrame(records)
+                        safe_sheet_name = v_type.replace('_', ' ').title()[:31]
+                        df.to_excel(writer, sheet_name=safe_sheet_name, index=False)
+                print(f"\n✓ Structural violations saved to: {structural_filename}")
+            except Exception as e:
+                print(f"\n❌ Error saving structural violations: {e}")
+        else:
+            print("\nNo structural violation data to save.")
+        
+        if soft_excel_data:
+            try:
+                with pd.ExcelWriter(soft_filename, engine='openpyxl') as writer:
+                    for v_type, records in sorted(soft_excel_data.items()):
+                        df = pd.DataFrame(records)
+                        safe_sheet_name = v_type.replace('_', ' ').title()[:31]
+                        df.to_excel(writer, sheet_name=safe_sheet_name, index=False)
+                print(f"✓ Soft constraint penalties saved to: {soft_filename}")
+            except Exception as e:
+                print(f"\n❌ Error saving soft constraint penalties: {e}")
+        else:
+            print("No soft constraint penalty data to save.")
+
+    if print_to_terminal:
+        # Print structural violations
+        print("\n" + "="*70)
+        print("--- RAW STRUCTURAL VIOLATIONS (Boolean Slack Variables - Pass 1) ---")
+        print("="*70)
+        if not structural_terminal_lines:
+            print("No structural slack variables found.")
+        else:
+            for line in structural_terminal_lines:
+                print(line)
+        
+        # Count actual violations
+        structural_violation_count = sum(1 for line in structural_terminal_lines if "= 1" in line)
+        print(f"\nTotal structural violations (value=1): {structural_violation_count}")
+        print("="*70)
+        
+        # Print soft constraint penalties
+        print("\n" + "="*70)
+        print("--- RAW SOFT CONSTRAINT PENALTIES (Integer Trackers - Pass 2) ---")
+        print("="*70)
+        if not soft_terminal_lines:
+            print("No soft constraint penalty trackers found.")
+        else:
+            for line in soft_terminal_lines:
+                print(line)
+        
+        # Count non-zero penalties
+        soft_violation_count = sum(1 for line in soft_terminal_lines if not line.endswith("= 0"))
+        print(f"\nTotal non-zero soft penalties: {soft_violation_count}")
+        print("="*70)
 
 def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_limit=None, random_seed=None, deterministic_mode=False, output_folder=None, pass_mode="full", structural_limit=None, pass1_hints=None):
     """
@@ -63,7 +776,7 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
     if TIME_GRANULARITY not in [10, 30]:
         raise ValueError(f"TIME_GRANULARITY_MINUTES must be 10 or 30, got {TIME_GRANULARITY}")
     
-    print(f"Time Granularity: {TIME_GRANULARITY} minutes")
+    print(f"⏱️  Time Granularity: {TIME_GRANULARITY} minutes")
     
     model = cp_model.CpModel()
 
@@ -84,7 +797,7 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
     
     is_dummy_faculty = {}  # (subject_id, section) -> BoolVar
     is_dummy_room = {}     # (subject_id, section) -> BoolVar
-    duration_violations = {}  # (subject_id, section) -> BoolVar 
+    duration_violations = {}  # (subject_id, section) -> BoolVar
 
     # Pre-compute qualified faculty and rooms per subject
     subject_qualified_faculty = {}
@@ -407,315 +1120,44 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
 
 #================================== END OF DAY GAP TRACKING ==================================
 
-#================================== START OF GHOST BLOCKS - VARIABLE CREATION ==================================
-    """
-    Ghost Blocks: Fixed-position vacancy intervals that classes must "kill" to exist.
+#================================== START OF TIMESLOT SYSTEM - INITIALIZATION ==================================
+    # Create timeslot grid data structure (will be populated by controller)
+    timeslot_data = create_timeslot_grid_data(model, faculty, batches, config)
     
-    For every Faculty/Batch on every Day:
-        - Physical Grid (GhostBlock): Fixed intervals representing VACANCY
-        - Logical Grid (TimeSlots): Boolean (1 = Matter/Class, 0 = Void/Empty)
-        - Control: GhostActive[i] (Boolean) - True = Void exists, False = Class killed ghost
-        - Inverter Sync: TimeSlots[i] = NOT(GhostActive[i])
-    """
+    # Apply Ghost Block Controller (creates ghost intervals, time_slots, inverter constraints)
+    ghost_data = apply_ghostblock_controller(
+        model, timeslot_data, faculty, batches,
+        intervals_per_faculty, intervals_per_batch,
+        is_assigned_faculty_map, is_assigned_batch_map,
+        active_for_faculty_map, active_for_batch_map,
+        meetings, faculty_qualified_subjects
+    )
     
-    # Helper function to calculate slots per day
-    def calculate_slots_for_day(day_idx, config):
-        """Calculate number of TIME_GRANULARITY slots for a given day"""
-        day_start = config["DAY_START_MINUTES"]
-        day_end = config["FRIDAY_END_MINUTES"] if day_idx == FRIDAY_IDX else config["DAY_END_MINUTES"]
-        day_span = day_end - day_start
-        return day_span // TIME_GRANULARITY
-    
-    # Storage for ghost grids
-    faculty_ghost_grid = {}  # (f_idx, day_idx) -> list of GhostSlot dicts
-    batch_ghost_grid = {}    # (b_idx, day_idx) -> list of GhostSlot dicts
-    
-    # Create Ghost Blocks for each Faculty
-    for f_idx, fac in enumerate(faculty):
-        for day_idx in range(len(config["SCHEDULING_DAYS"])):
-            num_slots = calculate_slots_for_day(day_idx, config)
-            day_offset = day_idx * MINUTES_IN_A_DAY
-            day_start_abs = config["DAY_START_MINUTES"] + day_offset
-            
-            ghost_slots = []
-            
-            for slot_idx in range(num_slots):
-                # --- THE PHYSICAL GRID (GhostBlock) ---
-                # Fixed position interval representing VACANCY
-                ghost_start = day_start_abs + (slot_idx * TIME_GRANULARITY)
-                ghost_size = TIME_GRANULARITY  # Fixed size (10 or 30 min)
-                ghost_end = ghost_start + ghost_size
-                
-                # Control: GhostActive[i] (Boolean)
-                # True = Void (vacancy exists), False = Matter (class killed this ghost)
-                ghost_active = model.NewBoolVar(
-                    f"ghost_active_f{f_idx}_d{day_idx}_s{slot_idx}"
-                )
-                
-                # Create optional interval controlled by ghost_active
-                # Only "exists" when active (representing vacancy)
-                ghost_interval = model.NewOptionalIntervalVar(
-                    start=ghost_start,           # Fixed position
-                    size=ghost_size,             # Fixed size
-                    end=ghost_end,               # Fixed end
-                    is_present=ghost_active,     # Only present if vacancy exists
-                    name=f"ghost_interval_f{f_idx}_d{day_idx}_s{slot_idx}"
-                )
-                
-                # --- THE LOGICAL GRID (TimeSlots) ---
-                # TimeSlots[i] = Matter (1) or Void (0)
-                # Inverter: TimeSlots[i] = NOT(GhostActive[i])
-                time_slot = model.NewBoolVar(f"timeslot_f{f_idx}_d{day_idx}_s{slot_idx}")
-                model.Add(time_slot == 1).OnlyEnforceIf(ghost_active.Not())  # Ghost killed → Matter
-                model.Add(time_slot == 0).OnlyEnforceIf(ghost_active)        # Ghost alive → Void
-                
-                ghost_slots.append({
-                    "slot_idx": slot_idx,
-                    "ghost_active": ghost_active,      # Control boolean
-                    "ghost_interval": ghost_interval,  # Physical representation
-                    "time_slot": time_slot,            # Logical representation
-                    "start_abs": ghost_start,          # For debugging
-                    "end_abs": ghost_end
-                })
-            
-            faculty_ghost_grid[(f_idx, day_idx)] = ghost_slots
-    
-    # Create Ghost Blocks for each Batch (identical structure)
-    for b_idx, batch in enumerate(batches):
-        for day_idx in range(len(config["SCHEDULING_DAYS"])):
-            num_slots = calculate_slots_for_day(day_idx, config)
-            day_offset = day_idx * MINUTES_IN_A_DAY
-            day_start_abs = config["DAY_START_MINUTES"] + day_offset
-            
-            ghost_slots = []
-            
-            for slot_idx in range(num_slots):
-                ghost_start = day_start_abs + (slot_idx * TIME_GRANULARITY)
-                ghost_size = TIME_GRANULARITY
-                ghost_end = ghost_start + ghost_size
-                
-                ghost_active = model.NewBoolVar(
-                    f"ghost_active_b{b_idx}_d{day_idx}_s{slot_idx}"
-                )
-                
-                ghost_interval = model.NewOptionalIntervalVar(
-                    start=ghost_start,
-                    size=ghost_size,
-                    end=ghost_end,
-                    is_present=ghost_active,
-                    name=f"ghost_interval_b{b_idx}_d{day_idx}_s{slot_idx}"
-                )
-                
-                time_slot = model.NewBoolVar(f"timeslot_b{b_idx}_d{day_idx}_s{slot_idx}")
-                model.Add(time_slot == 1).OnlyEnforceIf(ghost_active.Not())
-                model.Add(time_slot == 0).OnlyEnforceIf(ghost_active)
-                
-                ghost_slots.append({
-                    "slot_idx": slot_idx,
-                    "ghost_active": ghost_active,
-                    "ghost_interval": ghost_interval,
-                    "time_slot": time_slot,
-                    "start_abs": ghost_start,
-                    "end_abs": ghost_end
-                })
-            
-            batch_ghost_grid[(b_idx, day_idx)] = ghost_slots
-    
-    # Print Ghost Blocks variable count
-    total_faculty_ghost_vars = len(faculty) * len(config["SCHEDULING_DAYS"]) * calculate_slots_for_day(0, config) * 3
-    total_batch_ghost_vars = len(batches) * len(config["SCHEDULING_DAYS"]) * calculate_slots_for_day(0, config) * 3
-    print(f"👻 Ghost Blocks created:")
-    print(f"   Faculty: {len(faculty)} × {len(config['SCHEDULING_DAYS'])} days × {calculate_slots_for_day(0, config)} slots × 3 vars = ~{total_faculty_ghost_vars:,} variables")
-    print(f"   Batches: {len(batches)} × {len(config['SCHEDULING_DAYS'])} days × {calculate_slots_for_day(0, config)} slots × 3 vars = ~{total_batch_ghost_vars:,} variables")
-    print(f"   Total Ghost variables: ~{total_faculty_ghost_vars + total_batch_ghost_vars:,}")
+    # Extract results from controller
+    faculty_ghost_grid = ghost_data['faculty_ghost_grid']
+    batch_ghost_grid = ghost_data['batch_ghost_grid']
 
-#================================== END OF GHOST BLOCKS - VARIABLE CREATION ==================================
+#================================== END OF TIMESLOT SYSTEM - INITIALIZATION ==================================
 
-#================================== START OF LOGICAL ENGINE - STREAK ANALYSIS ==================================
-    """
-    Logical Engine: Track consecutive class and gap streaks
-    - ActiveStreak[i]: Number of consecutive CLASS slots ending at position i
-    - VacantStreak[i]: Number of consecutive GAP slots ending at position i
+#================================== START OF TIMESLOT SYSTEM - STREAK TRACKING ==================================
+    # Add streak tracking (reads time_slot arrays, creates streak variables)
+    streak_data = add_streak_tracking(model, timeslot_data, faculty, batches)
     
-    Uses time_slot boolean (1 = CLASS, 0 = GAP) from Ghost Blocks
-    """
-    
-    print("[Ghost Blocks] Building Logical Engine - Streak Analysis...")
-    
-    # Storage for streak variables
-    faculty_active_streak = {}  # (f_idx, day_idx) -> list of IntVars
-    faculty_vacant_streak = {}  # (f_idx, day_idx) -> list of IntVars
-    batch_active_streak = {}    # (b_idx, day_idx) -> list of IntVars
-    batch_vacant_streak = {}    # (b_idx, day_idx) -> list of IntVars
-    
-    # Faculty Streak Tracking
-    for f_idx in range(len(faculty)):
-        for day_idx in range(len(config["SCHEDULING_DAYS"])):
-            ghost_slots = faculty_ghost_grid[(f_idx, day_idx)]
-            N = len(ghost_slots)
-            
-            faculty_active_streak[(f_idx, day_idx)] = []
-            faculty_vacant_streak[(f_idx, day_idx)] = []
-            
-            for i in range(N):
-                time_slot = ghost_slots[i]["time_slot"]  # 1 = CLASS, 0 = GAP
-                
-                # ActiveStreak[i]: Consecutive CLASS slots ending at i
-                active_streak = model.NewIntVar(0, N, f"active_streak_f{f_idx}_d{day_idx}_s{i}")
-                
-                if i == 0:
-                    # First slot: ActiveStreak[0] = 1 if CLASS, else 0
-                    model.Add(active_streak == 1).OnlyEnforceIf(time_slot)
-                    model.Add(active_streak == 0).OnlyEnforceIf(time_slot.Not())
-                else:
-                    prev_active = faculty_active_streak[(f_idx, day_idx)][i-1]
-                    
-                    # If GAP: ActiveStreak[i] = 0
-                    model.Add(active_streak == 0).OnlyEnforceIf(time_slot.Not())
-                    
-                    # If CLASS: ActiveStreak[i] = ActiveStreak[i-1] + 1
-                    model.Add(active_streak == prev_active + 1).OnlyEnforceIf(time_slot)
-                
-                faculty_active_streak[(f_idx, day_idx)].append(active_streak)
-                
-                # VacantStreak[i]: Consecutive GAP slots ending at i
-                vacant_streak = model.NewIntVar(0, N, f"vacant_streak_f{f_idx}_d{day_idx}_s{i}")
-                
-                if i == 0:
-                    # First slot: VacantStreak[0] = 1 if GAP, else 0
-                    model.Add(vacant_streak == 1).OnlyEnforceIf(time_slot.Not())
-                    model.Add(vacant_streak == 0).OnlyEnforceIf(time_slot)
-                else:
-                    prev_vacant = faculty_vacant_streak[(f_idx, day_idx)][i-1]
-                    
-                    # If CLASS: VacantStreak[i] = 0
-                    model.Add(vacant_streak == 0).OnlyEnforceIf(time_slot)
-                    
-                    # If GAP: VacantStreak[i] = VacantStreak[i-1] + 1
-                    model.Add(vacant_streak == prev_vacant + 1).OnlyEnforceIf(time_slot.Not())
-                
-                faculty_vacant_streak[(f_idx, day_idx)].append(vacant_streak)
-    
-    # Batch Streak Tracking
-    for b_idx in range(len(batches)):
-        for day_idx in range(len(config["SCHEDULING_DAYS"])):
-            ghost_slots = batch_ghost_grid[(b_idx, day_idx)]
-            N = len(ghost_slots)
-            
-            batch_active_streak[(b_idx, day_idx)] = []
-            batch_vacant_streak[(b_idx, day_idx)] = []
-            
-            for i in range(N):
-                time_slot = ghost_slots[i]["time_slot"]
-                
-                # ActiveStreak[i]
-                active_streak = model.NewIntVar(0, N, f"active_streak_b{b_idx}_d{day_idx}_s{i}")
-                
-                if i == 0:
-                    model.Add(active_streak == 1).OnlyEnforceIf(time_slot)
-                    model.Add(active_streak == 0).OnlyEnforceIf(time_slot.Not())
-                else:
-                    prev_active = batch_active_streak[(b_idx, day_idx)][i-1]
-                    model.Add(active_streak == 0).OnlyEnforceIf(time_slot.Not())
-                    model.Add(active_streak == prev_active + 1).OnlyEnforceIf(time_slot)
-                
-                batch_active_streak[(b_idx, day_idx)].append(active_streak)
-                
-                # VacantStreak[i]
-                vacant_streak = model.NewIntVar(0, N, f"vacant_streak_b{b_idx}_d{day_idx}_s{i}")
-                
-                if i == 0:
-                    model.Add(vacant_streak == 1).OnlyEnforceIf(time_slot.Not())
-                    model.Add(vacant_streak == 0).OnlyEnforceIf(time_slot)
-                else:
-                    prev_vacant = batch_vacant_streak[(b_idx, day_idx)][i-1]
-                    model.Add(vacant_streak == 0).OnlyEnforceIf(time_slot)
-                    model.Add(vacant_streak == prev_vacant + 1).OnlyEnforceIf(time_slot.Not())
-                
-                batch_vacant_streak[(b_idx, day_idx)].append(vacant_streak)
-    
-    total_streak_vars = (len(faculty) + len(batches)) * len(config["SCHEDULING_DAYS"]) * 2
-    avg_slots_per_day = len(faculty_ghost_grid[(0, 0)])
-    total_intvars = (len(faculty) + len(batches)) * len(config["SCHEDULING_DAYS"]) * avg_slots_per_day * 2
-    print(f"   Created streak tracking for {total_streak_vars} entity-day combinations")
-    print(f"   Total streak IntVars: ~{total_intvars:,} (ActiveStreak + VacantStreak per slot)")
+    # Extract streak variables for use in constraints
+    faculty_active_streak = streak_data['faculty_active_streak']
+    faculty_vacant_streak = streak_data['faculty_vacant_streak']
+    batch_active_streak = streak_data['batch_active_streak']
+    batch_vacant_streak = streak_data['batch_vacant_streak']
 
-#================================== END OF LOGICAL ENGINE - STREAK ANALYSIS ==================================
+#================================== END OF TIMESLOT SYSTEM - STREAK TRACKING ==================================
 
-#================================== START OF LOGICAL ENGINE - HARD CONSTRAINTS ==================================
-    print("\n5. Adding Logical Engine Hard Constraints (Max Class, Min Gap)...")
-    
-    # Calculate slot limits from config
-    MAX_CLASS_SLOTS = int((config["MAX_CONTINUOUS_CLASS_HOURS"] * 60) / config["TIME_GRANULARITY_MINUTES"])
-    MIN_GAP_SLOTS = int((config["MIN_GAP_HOURS"] * 60) / config["TIME_GRANULARITY_MINUTES"])
-    
-    print(f"   Max continuous class: {config['MAX_CONTINUOUS_CLASS_HOURS']}h = {MAX_CLASS_SLOTS} slots")
-    print(f"   Min gap: {config['MIN_GAP_HOURS']}h = {MIN_GAP_SLOTS} slots")
-    
-    total_max_class_constraints = 0
-    total_min_gap_constraints = 0
-    
-    # Faculty constraints
-    for f_idx, faculty_member in enumerate(faculty):
-        for day_idx in range(len(config["SCHEDULING_DAYS"])):
-            slots = faculty_ghost_grid[(f_idx, day_idx)]
-            N = len(slots)
-            
-            for i in range(N):
-                time_slot = slots[i]["time_slot"]
-                active_streak = faculty_active_streak[(f_idx, day_idx)][i]
-                vacant_streak = faculty_vacant_streak[(f_idx, day_idx)][i]
-                
-                # HARD: Max Continuous Class - ActiveStreak[i] <= MAX_CLASS_SLOTS
-                model.Add(active_streak <= MAX_CLASS_SLOTS)
-                total_max_class_constraints += 1
-                
-                # HARD: Min Gap - VacantStreak[i] >= MIN_GAP_SLOTS when gap ends
-                # GapEndsHere = (TimeSlots[i] == 0) AND (i < N-1 AND TimeSlots[i+1] == 1) AND (VacantStreak[i] <= i)
-                if i < N - 1:
-                    next_time_slot = slots[i+1]["time_slot"]
-                    gap_ends_here = model.NewBoolVar(f"gap_ends_f{f_idx}_d{day_idx}_i{i}")
-                    
-                    # gap_ends_here = (time_slot == 0) AND (next_time_slot == 1) AND (vacant_streak <= i)
-                    model.AddBoolAnd([time_slot.Not(), next_time_slot]).OnlyEnforceIf(gap_ends_here)
-                    model.AddBoolOr([time_slot, next_time_slot.Not()]).OnlyEnforceIf(gap_ends_here.Not())
-                    
-                    # If gap_ends_here, then vacant_streak >= MIN_GAP_SLOTS
-                    model.Add(vacant_streak >= MIN_GAP_SLOTS).OnlyEnforceIf(gap_ends_here)
-                    total_min_gap_constraints += 1
-    
-    # Batch constraints
-    for b_idx, batch in enumerate(batches):
-        for day_idx in range(len(config["SCHEDULING_DAYS"])):
-            slots = batch_ghost_grid[(b_idx, day_idx)]
-            N = len(slots)
-            
-            for i in range(N):
-                time_slot = slots[i]["time_slot"]
-                active_streak = batch_active_streak[(b_idx, day_idx)][i]
-                vacant_streak = batch_vacant_streak[(b_idx, day_idx)][i]
-                
-                # HARD: Max Continuous Class - ActiveStreak[i] <= MAX_CLASS_SLOTS
-                model.Add(active_streak <= MAX_CLASS_SLOTS)
-                total_max_class_constraints += 1
-                
-                # HARD: Min Gap - VacantStreak[i] >= MIN_GAP_SLOTS when gap ends
-                if i < N - 1:
-                    next_time_slot = slots[i+1]["time_slot"]
-                    gap_ends_here = model.NewBoolVar(f"gap_ends_b{b_idx}_d{day_idx}_i{i}")
-                    
-                    # gap_ends_here = (time_slot == 0) AND (next_time_slot == 1)
-                    model.AddBoolAnd([time_slot.Not(), next_time_slot]).OnlyEnforceIf(gap_ends_here)
-                    model.AddBoolOr([time_slot, next_time_slot.Not()]).OnlyEnforceIf(gap_ends_here.Not())
-                    
-                    # If gap_ends_here, then vacant_streak >= MIN_GAP_SLOTS
-                    model.Add(vacant_streak >= MIN_GAP_SLOTS).OnlyEnforceIf(gap_ends_here)
-                    total_min_gap_constraints += 1
-    
-    print(f"   Max Continuous Class constraints: {total_max_class_constraints}")
-    print(f"   Min Gap constraints: {total_min_gap_constraints}")
+#================================== START OF TIMESLOT SYSTEM - HARD CONSTRAINTS ==================================
+    # Add hard constraints (max continuous class, min gap)
+    hard_constraints_results = add_hard_constraints(model, timeslot_data, streak_data, faculty, batches)
+    faculty_gap_ends_here = hard_constraints_results['faculty_gap_ends_here']
+    batch_gap_ends_here = hard_constraints_results['batch_gap_ends_here']
 
-#================================== END OF LOGICAL ENGINE - HARD CONSTRAINTS ==================================
+#================================== END OF TIMESLOT SYSTEM - HARD CONSTRAINTS ==================================
 
 #================================== START OF VIOLATION TRACKERS [VARIABLES] ==================================
     faculty_overload_minutes = [model.NewIntVar(0, 10000, f"overload_mins_f{f_idx}") for f_idx, f in enumerate(faculty)]
@@ -851,7 +1293,7 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
     - NoOverlap enforces: Classes + Ghosts cannot coexist in the same space
     """
     
-    """ #--- ROOM NO-OVERLAP (No Ghost Blocks - Rooms don't have vacancy tracking) ---
+    #--- ROOM NO-OVERLAP (No Ghost Blocks - Rooms don't have vacancy tracking) ---
     for r_idx, _ in enumerate(rooms):
         intervals_in_room = []
         for sub in subjects:
@@ -915,12 +1357,7 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
                     )
                     faculty_intervals.append(faculty_interval)
         
-        # ⚡ GHOST COLLISION: Add ghost intervals for each day
-        for day_idx in range(len(config["SCHEDULING_DAYS"])):
-            ghost_slots = faculty_ghost_grid[(f_idx, day_idx)]
-            for ghost_slot in ghost_slots:
-                faculty_intervals.append(ghost_slot["ghost_interval"])
-
+        # Note: Ghost intervals already added by controller to intervals_per_faculty
         # Physics: Classes + Ghosts cannot overlap
         if faculty_intervals:
             model.AddNoOverlap(faculty_intervals)
@@ -990,121 +1427,18 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
                     )
                     batch_intervals.append(batch_interval)
         
-        # ⚡ GHOST COLLISION: Add ghost intervals for each day
-        for day_idx in range(len(config["SCHEDULING_DAYS"])):
-            ghost_slots = batch_ghost_grid[(b_idx, day_idx)]
-            for ghost_slot in ghost_slots:
-                batch_intervals.append(ghost_slot["ghost_interval"])
-        
+        # Note: Ghost intervals already added by controller to intervals_per_batch
         # Physics: Classes + Ghosts + External cannot overlap
         if batch_intervals:
-            model.AddNoOverlap(batch_intervals) """
+            model.AddNoOverlap(batch_intervals)
 #================================== END OF NO-OVERLAP CONSTRAINTS + GHOST COLLISION ==================================
 
 #================================== START OF CONSERVATION OF TIME [HARD] ==================================
-    """
-    Physics Engine Rule 2: CONSERVATION OF TIME (Checksum)
-    - Time cannot be destroyed, only converted from Void to Matter
-    - Total active ghosts + total class time = total available time
-    - Prevents solver from "cheating" by turning off ghosts without scheduling classes
-    """
-    
-    # Conservation for Faculty (per day)
-    for f_idx, fac in enumerate(faculty):
-        for day_idx in range(len(config["SCHEDULING_DAYS"])):
-            ghost_slots = faculty_ghost_grid[(f_idx, day_idx)]
-            num_slots = len(ghost_slots)
-            
-            # Calculate total class minutes for this faculty on this day
-            class_minutes_terms = []
-            qualified_subjects = faculty_qualified_subjects.get(f_idx, [])
-            
-            for sub in qualified_subjects:
-                for s in range(sub.ideal_num_sections):
-                    # Check if faculty is assigned to this section
-                    if (f_idx, sub.subject_id, s) not in is_assigned_faculty_map:
-                        continue
-                    
-                    # Check if this meeting is active for this faculty
-                    key = (f_idx, sub.subject_id, s, day_idx)
-                    if key not in active_for_faculty_map:
-                        continue
-                    
-                    active_for_faculty = active_for_faculty_map[key]
-                    duration_var = meetings[(sub.subject_id, s, day_idx)]["duration"]
-                    
-                    # active_minutes = duration * active_for_faculty (boolean multiplication)
-                    max_dur = duration_var.Proto().domain[-1]
-                    active_minutes = model.NewIntVar(0, max_dur, 
-                        f"class_mins_f{f_idx}_d{day_idx}_{sub.subject_id}_s{s}")
-                    model.AddMultiplicationEquality(active_minutes, [duration_var, active_for_faculty])
-                    class_minutes_terms.append(active_minutes)
-            
-            total_class_minutes = sum(class_minutes_terms) if class_minutes_terms else 0
-            
-            # Calculate total ghost minutes (vacancy)
-            total_ghost_slots = sum(ghost_slot["ghost_active"] for ghost_slot in ghost_slots)
-            total_ghost_minutes = total_ghost_slots * TIME_GRANULARITY
-            
-            # Conservation Law: Ghost Minutes + Class Minutes = Total Available Time
-            total_available_minutes = num_slots * TIME_GRANULARITY
-            
-            model.Add(total_ghost_minutes + total_class_minutes == total_available_minutes)
-    
-    # Conservation for Batches (per day)
-    for b_idx, batch in enumerate(batches):
-        for day_idx in range(len(config["SCHEDULING_DAYS"])):
-            ghost_slots = batch_ghost_grid[(b_idx, day_idx)]
-            num_slots = len(ghost_slots)
-            
-            # Calculate total class minutes for this batch on this day
-            class_minutes_terms = []
-            
-            # 1. Regular class meetings
-            for sub in batch.subjects:
-                for s in range(sub.ideal_num_sections):
-                    # Check if batch is assigned to this section
-                    if (b_idx, sub.subject_id, s) not in is_assigned_batch_map:
-                        continue
-                    
-                    # Check if this meeting is active for this batch
-                    key = (b_idx, sub.subject_id, s, day_idx)
-                    if key not in active_for_batch_map:
-                        continue
-                    
-                    active_for_batch = active_for_batch_map[key]
-                    duration_var = meetings[(sub.subject_id, s, day_idx)]["duration"]
-                    
-                    # active_minutes = duration * active_for_batch
-                    max_dur = duration_var.Proto().domain[-1]
-                    active_minutes = model.NewIntVar(0, max_dur, 
-                        f"class_mins_b{b_idx}_d{day_idx}_{sub.subject_id}_s{s}")
-                    model.AddMultiplicationEquality(active_minutes, [duration_var, active_for_batch])
-                    class_minutes_terms.append(active_minutes)
-            
-            # 2. External meetings (fixed duration)
-            for meeting in batch.external_meetings:
-                if meeting.day_index == day_idx:
-                    external_duration = meeting.end_minutes - meeting.start_minutes
-                    if external_duration > 0:
-                        class_minutes_terms.append(external_duration)  # Constant
-            
-            total_class_minutes = sum(class_minutes_terms) if class_minutes_terms else 0
-            
-            # Calculate total ghost minutes
-            total_ghost_slots = sum(ghost_slot["ghost_active"] for ghost_slot in ghost_slots)
-            total_ghost_minutes = total_ghost_slots * TIME_GRANULARITY
-            
-            # Conservation Law
-            total_available_minutes = num_slots * TIME_GRANULARITY
-            
-            model.Add(total_ghost_minutes + total_class_minutes == total_available_minutes)
-    
-    print(f"⚡ Physics Engine activated:")
-    print(f"   Collision: Ghost intervals added to NoOverlap constraints")
-    print(f"   Conservation: {len(faculty) * len(config['SCHEDULING_DAYS']) + len(batches) * len(config['SCHEDULING_DAYS'])} checksum constraints")
-
+    # NOTE: Conservation of time constraints are now handled inside the Ghost Block Controller
+    # See timeslot_system/controllers/ghostblock_controller.py for implementation
 #================================== END OF CONSERVATION OF TIME ==================================
+
+
 
 #================================== START OF DURATION CONSTRAINT [HARD-RELAXED] ==================================
     # [HARD-RELAXED] Duration constraint with boolean slack - gated by section_has_batch
@@ -1414,116 +1748,23 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
                 model.Add(section_underfill_students[key] == 0).OnlyEnforceIf(has_batch.Not())
     #================================== END OF SECTION FILL TRACKING ==================================
 
-    #================================== START OF LOGICAL ENGINE - SOFT CONSTRAINTS ==================================
+    #================================== START OF TIMESLOT SYSTEM - SOFT CONSTRAINTS ==================================
+    # Initialize block_ends tracking (will be populated if soft constraints are built)
+    faculty_block_ends = {}
+    batch_block_ends = {}
+    
     if build_soft_constraints:
-        print("\n6. Adding Logical Engine Soft Constraints (Min Class, Max Gap)...")
-        
-        # Calculate slot limits from config
-        MIN_CLASS_SLOTS = int((config["MIN_CONTINUOUS_CLASS_HOURS"] * 60) / config["TIME_GRANULARITY_MINUTES"])
-        MAX_GAP_SLOTS = int((config["MAX_GAP_HOURS"] * 60) / config["TIME_GRANULARITY_MINUTES"])
-        
-        print(f"   Min continuous class: {config['MIN_CONTINUOUS_CLASS_HOURS']}h = {MIN_CLASS_SLOTS} slots")
-        print(f"   Max gap: {config['MAX_GAP_HOURS']}h = {MAX_GAP_SLOTS} slots")
-        
-        total_min_class_violations = 0
-        total_max_gap_violations = 0
-        
-        # Faculty soft constraints
-        for f_idx, faculty_member in enumerate(faculty):
-            for day_idx in range(len(config["SCHEDULING_DAYS"])):
-                slots = faculty_ghost_grid[(f_idx, day_idx)]
-                N = len(slots)
-                
-                for i in range(N):
-                    time_slot = slots[i]["time_slot"]
-                    active_streak = faculty_active_streak[(f_idx, day_idx)][i]
-                    vacant_streak = faculty_vacant_streak[(f_idx, day_idx)][i]
-                    
-                    # SOFT: Min Continuous Class
-                    # BlockEnds = (TimeSlots[i] == 1) AND (i == N-1 OR TimeSlots[i+1] == 0)
-                    # Penalty: Max(0, MIN_CLASS_SLOTS - ActiveStreak[i])
-                    block_ends = model.NewBoolVar(f"block_ends_f{f_idx}_d{day_idx}_i{i}")
-                    
-                    if i == N - 1:
-                        # Last slot: block_ends = time_slot
-                        model.Add(block_ends == 1).OnlyEnforceIf(time_slot)
-                        model.Add(block_ends == 0).OnlyEnforceIf(time_slot.Not())
-                    else:
-                        next_time_slot = slots[i+1]["time_slot"]
-                        # block_ends = (time_slot == 1) AND (next_time_slot == 0)
-                        model.AddBoolAnd([time_slot, next_time_slot.Not()]).OnlyEnforceIf(block_ends)
-                        model.AddBoolOr([time_slot.Not(), next_time_slot]).OnlyEnforceIf(block_ends.Not())
-                    
-                    # Violation: Max(0, MIN_CLASS_SLOTS - active_streak)
-                    violation = model.NewIntVar(0, MIN_CLASS_SLOTS, f"min_class_viol_f{f_idx}_d{day_idx}_i{i}")
-                    model.Add(violation >= MIN_CLASS_SLOTS - active_streak).OnlyEnforceIf(block_ends)
-                    model.Add(violation == 0).OnlyEnforceIf(block_ends.Not())
-                    faculty_under_minimum_block[f_idx][day_idx].append(violation)
-                    total_min_class_violations += 1
-                    
-                    # SOFT: Max Gap
-                    # GapEndsHere = (TimeSlots[i] == 0) AND (i < N-1 AND TimeSlots[i+1] == 1)
-                    # Penalty: Max(0, VacantStreak[i] - MAX_GAP_SLOTS)
-                    if i < N - 1:
-                        next_time_slot = slots[i+1]["time_slot"]
-                        gap_ends_here = model.NewBoolVar(f"gap_ends_soft_f{f_idx}_d{day_idx}_i{i}")
-                        
-                        # gap_ends_here = (time_slot == 0) AND (next_time_slot == 1)
-                        model.AddBoolAnd([time_slot.Not(), next_time_slot]).OnlyEnforceIf(gap_ends_here)
-                        model.AddBoolOr([time_slot, next_time_slot.Not()]).OnlyEnforceIf(gap_ends_here.Not())
-                        
-                        # Violation: Max(0, vacant_streak - MAX_GAP_SLOTS)
-                        violation = model.NewIntVar(0, 100, f"max_gap_viol_f{f_idx}_d{day_idx}_i{i}")
-                        model.Add(violation >= vacant_streak - MAX_GAP_SLOTS).OnlyEnforceIf(gap_ends_here)
-                        model.Add(violation == 0).OnlyEnforceIf(gap_ends_here.Not())
-                        faculty_excess_gaps[f_idx][day_idx].append(violation)
-                        total_max_gap_violations += 1
-        
-        # Batch soft constraints
-        for b_idx, batch in enumerate(batches):
-            for day_idx in range(len(config["SCHEDULING_DAYS"])):
-                slots = batch_ghost_grid[(b_idx, day_idx)]
-                N = len(slots)
-                
-                for i in range(N):
-                    time_slot = slots[i]["time_slot"]
-                    active_streak = batch_active_streak[(b_idx, day_idx)][i]
-                    vacant_streak = batch_vacant_streak[(b_idx, day_idx)][i]
-                    
-                    # SOFT: Min Continuous Class
-                    block_ends = model.NewBoolVar(f"block_ends_b{b_idx}_d{day_idx}_i{i}")
-                    
-                    if i == N - 1:
-                        model.Add(block_ends == 1).OnlyEnforceIf(time_slot)
-                        model.Add(block_ends == 0).OnlyEnforceIf(time_slot.Not())
-                    else:
-                        next_time_slot = slots[i+1]["time_slot"]
-                        model.AddBoolAnd([time_slot, next_time_slot.Not()]).OnlyEnforceIf(block_ends)
-                        model.AddBoolOr([time_slot.Not(), next_time_slot]).OnlyEnforceIf(block_ends.Not())
-                    
-                    violation = model.NewIntVar(0, MIN_CLASS_SLOTS, f"min_class_viol_b{b_idx}_d{day_idx}_i{i}")
-                    model.Add(violation >= MIN_CLASS_SLOTS - active_streak).OnlyEnforceIf(block_ends)
-                    model.Add(violation == 0).OnlyEnforceIf(block_ends.Not())
-                    batch_under_minimum_block[b_idx][day_idx].append(violation)
-                    total_min_class_violations += 1
-                    
-                    # SOFT: Max Gap
-                    if i < N - 1:
-                        next_time_slot = slots[i+1]["time_slot"]
-                        gap_ends_here = model.NewBoolVar(f"gap_ends_soft_b{b_idx}_d{day_idx}_i{i}")
-                        
-                        model.AddBoolAnd([time_slot.Not(), next_time_slot]).OnlyEnforceIf(gap_ends_here)
-                        model.AddBoolOr([time_slot, next_time_slot.Not()]).OnlyEnforceIf(gap_ends_here.Not())
-                        
-                        violation = model.NewIntVar(0, 100, f"max_gap_viol_b{b_idx}_d{day_idx}_i{i}")
-                        model.Add(violation >= vacant_streak - MAX_GAP_SLOTS).OnlyEnforceIf(gap_ends_here)
-                        model.Add(violation == 0).OnlyEnforceIf(gap_ends_here.Not())
-                        batch_excess_gaps[b_idx][day_idx].append(violation)
-                        total_max_gap_violations += 1
-        
-        print(f"   Min Continuous Class violation trackers: {total_min_class_violations}")
-        print(f"   Max Gap violation trackers: {total_max_gap_violations}")
-    #================================== END OF LOGICAL ENGINE - SOFT CONSTRAINTS ==================================
+        # Add soft constraints (min continuous class, max gap) with violation tracking
+        violation_trackers = {
+            'faculty_under_minimum_block': faculty_under_minimum_block,
+            'batch_under_minimum_block': batch_under_minimum_block,
+            'faculty_excess_gaps': faculty_excess_gaps,
+            'batch_excess_gaps': batch_excess_gaps
+        }
+        soft_constraints_results = add_soft_constraints(model, timeslot_data, streak_data, faculty, batches, violation_trackers)
+        faculty_block_ends = soft_constraints_results['faculty_block_ends']
+        batch_block_ends = soft_constraints_results['batch_block_ends']
+    #================================== END OF TIMESLOT SYSTEM - SOFT CONSTRAINTS ==================================
 
     # Collect structural slack variables for Pass 1
     structural_violations = []
@@ -1690,9 +1931,11 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
         # DRS debug export removed - was causing NameError
         
         # Ghost Grid Debug - Pass 1
-        print_ghost_grid_debug(faculty_ghost_grid, batch_ghost_grid, faculty, batches, config, 
+        ghost_grid_debug(faculty_ghost_grid, batch_ghost_grid, faculty, batches, config, 
                               solver, faculty_active_streak, faculty_vacant_streak,
                               batch_active_streak, batch_vacant_streak,
+                              faculty_block_ends, batch_block_ends,
+                              faculty_gap_ends_here, batch_gap_ends_here,
                               output_dir=log_dir, pass_name="pass1")
         
         print_all_meetings_debug(meetings, assigned_faculty, assigned_room, section_assignments,
@@ -1850,9 +2093,11 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
     # DRS debug export removed - was causing NameError
     
     # Ghost Grid Debug - Pass 2
-    print_ghost_grid_debug(faculty_ghost_grid, batch_ghost_grid, faculty, batches, config, 
+    ghost_grid_debug(faculty_ghost_grid, batch_ghost_grid, faculty, batches, config, 
                           solver, faculty_active_streak, faculty_vacant_streak,
                           batch_active_streak, batch_vacant_streak,
+                          faculty_block_ends, batch_block_ends,
+                          faculty_gap_ends_here, batch_gap_ends_here,
                           output_dir=log_dir, pass_name="pass2")
     
     print_all_meetings_debug(meetings, assigned_faculty, assigned_room, section_assignments,

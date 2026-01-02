@@ -293,6 +293,7 @@ def filter_infeasible_subjects(subjects, rooms, faculty, batches, config):
     3. Incompatible room type (room_type_id doesn't exist in available rooms)
     
     Also cleans up all references to removed subjects from batches and faculty.
+    Writes removed_subjects.txt file with simple format.
     
     Args:
         subjects: List of Subject objects
@@ -302,7 +303,7 @@ def filter_infeasible_subjects(subjects, rooms, faculty, batches, config):
         config: Configuration dict
     
     Returns:
-        Tuple of (filtered_subjects, removed_subjects)
+        Tuple of (filtered_subjects, removed_subjects_with_reasons)
     """
     # Build set of available room types
     available_room_types = set()
@@ -311,7 +312,7 @@ def filter_infeasible_subjects(subjects, rooms, faculty, batches, config):
             available_room_types.add(room.room_type_id)
     
     filtered_subjects = []
-    removed_subjects = []
+    removed_subjects_with_reasons = []
     removed_subject_ids = set()
     
     print("\n" + "=" * 80)
@@ -358,14 +359,28 @@ def filter_infeasible_subjects(subjects, rooms, faculty, batches, config):
         
         # Remove if ANY condition fails (OR logic)
         if not has_meetings or not has_qualified_faculty or not has_enrolled_batch or not has_compatible_room:
-            removed_subjects.append(subject)
+            # Build list of reasons for removal (simple format)
+            reasons = []
+            if not has_meetings:
+                reasons.append("Meetings")
+            if not has_qualified_faculty:
+                reasons.append("Teacher")
+            if not has_enrolled_batch:
+                reasons.append("Students")
+            if not has_compatible_room:
+                reasons.append("Room Type")
+            
+            # Store subject and reasons
+            removed_subjects_with_reasons.append({
+                "subject": subject,
+                "subject_id": subject.subject_id,
+                "reasons": reasons
+            })
             removed_subject_ids.add(subject.subject_id)
-            room_type_str = str(subject.room_type_id) if hasattr(subject, 'room_type_id') and subject.room_type_id else "None"
-            print(f"REMOVED: {subject.subject_id} (Room Type: {room_type_str})")
-            print(f"   - No meetings scheduled: {not has_meetings}")
-            print(f"   - No qualified faculty: {not has_qualified_faculty}")
-            print(f"   - No enrolled batches: {not has_enrolled_batch}")
-            print(f"   - No compatible rooms: {not has_compatible_room}")
+            
+            # Print removal info
+            reasons_str = ", ".join([f"No {r}" for r in reasons])
+            print(f"REMOVED: {subject.subject_id} - {reasons_str}")
         else:
             filtered_subjects.append(subject)
     
@@ -404,11 +419,24 @@ def filter_infeasible_subjects(subjects, rooms, faculty, batches, config):
     print()
     print(f"Summary:")
     print(f"   Total subjects: {len(subjects)}")
-    print(f"   Removed: {len(removed_subjects)}")
+    print(f"   Removed: {len(removed_subjects_with_reasons)}")
     print(f"   Remaining: {len(filtered_subjects)}")
     print("=" * 80 + "\n")
     
-    return filtered_subjects, removed_subjects
+    # Write removed subjects to .txt file
+    if removed_subjects_with_reasons:
+        output_file = "removed_subjects.txt"
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write("REMOVED SUBJECTS\n")
+            f.write("=" * 60 + "\n\n")
+            for item in removed_subjects_with_reasons:
+                sub = item["subject"]
+                subject_name = sub.name if hasattr(sub, 'name') else item['subject_id']
+                reasons_str = ", ".join([f"No {r}" for r in item["reasons"]])
+                f.write(f"{item['subject_id']} ({subject_name}) - {reasons_str}\n")
+        print(f"📝 Removed subjects list saved to: {output_file}")
+    
+    return filtered_subjects, removed_subjects_with_reasons
 
 def run_two_pass_scheduler(config, subjects, rooms, faculty, batches, subjects_map,
                           seed, pass1_time, pass2_time, output_folder, deterministic_mode=False):
@@ -599,10 +627,10 @@ if __name__ == '__main__':
     # ============================================
 
     hour_time_limit = 0
-    minute_time_limit = 15
+    minute_time_limit = 3
     
     hour_time_seed = 0
-    minute_time_seed = 15
+    minute_time_seed = 3
     
     total_time_limit_input = round(((hour_time_limit * 60) + minute_time_limit) * 60)
     time_per_seed_input = round((hour_time_seed * 60) + minute_time_seed) * 60 
