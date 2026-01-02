@@ -627,10 +627,10 @@ if __name__ == '__main__':
     # ============================================
 
     hour_time_limit = 0
-    minute_time_limit = 3
+    minute_time_limit = 15
     
     hour_time_seed = 0
-    minute_time_seed = 3
+    minute_time_seed = 15
     
     total_time_limit_input = round(((hour_time_limit * 60) + minute_time_limit) * 60)
     time_per_seed_input = round((hour_time_seed * 60) + minute_time_seed) * 60 

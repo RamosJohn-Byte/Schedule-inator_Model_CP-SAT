@@ -261,6 +261,7 @@ def apply_ghostblock_controller(model, timeslot_data, faculty, batches, interval
     print(f"   Conservation: {len(faculty) * len(config['SCHEDULING_DAYS']) + len(batches) * len(config['SCHEDULING_DAYS'])} checksum constraints")
     
     return {
+        'controller_type': 'ghostblock',
         'faculty_ghost_grid': faculty_ghost_grid,
         'batch_ghost_grid': batch_ghost_grid
     }

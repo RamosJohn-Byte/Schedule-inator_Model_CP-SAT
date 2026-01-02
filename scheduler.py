@@ -14,7 +14,11 @@ from timeslot_system.timeslot_grid import create_timeslot_grid_data
 from timeslot_system.controllers.ghostblock_controller import apply_ghostblock_controller
 from timeslot_system.streak_tracker import add_streak_tracking
 from timeslot_system.timeslot_constraints import add_hard_constraints, add_soft_constraints
-from timeslot_system.debug.ghost_grid_exporter import print_ghost_grid_debug as ghost_grid_debug
+from timeslot_system.debug.controller_debug import export_controller_debug
+
+# Debug and Export Imports
+from export_debug import write_solver_diagnostics, print_all_meetings_debug
+from export_reports import print_raw_violations, human_readable_violation_report
 
 # ============================================================================
 # SOLVER DIAGNOSTICS CONFIGURATION
@@ -32,170 +36,6 @@ SHOW_SOLUTION_LOGS = True          # Show when intermediate solutions are found
 SHOW_OPTIMIZATION_LOGS = True      # Show detailed progress during solution improvement
 # ============================================================================
 
-# Global variable to store diagnostics file path (set by run_scheduler)
-_diagnostics_file_path = None
-
-def write_solver_diagnostics(solver, model, status, pass_name="", output_dir=None):
-    """
-    Write comprehensive solver diagnostics to a file for later review.
-    Shows search statistics, efficiency metrics, and interpretation.
-    
-    Args:
-        solver: CpSolver instance after solving
-        model: CpModel instance
-        status: Solve status code
-        pass_name: Name of the pass (e.g., "PASS 1", "PASS 2")
-        output_dir: Directory to write diagnostics file (uses global if None)
-    """
-    if not ENABLE_SOLVER_DIAGNOSTICS:
-        return
-    
-    global _diagnostics_file_path
-    
-    # Determine output file path
-    if output_dir:
-        diagnostics_path = os.path.join(output_dir, "solver_diagnostics.txt")
-        _diagnostics_file_path = diagnostics_path
-    elif _diagnostics_file_path:
-        diagnostics_path = _diagnostics_file_path
-    else:
-        diagnostics_path = "solver_diagnostics.txt"
-    
-    # Ensure directory exists
-    os.makedirs(os.path.dirname(diagnostics_path) if os.path.dirname(diagnostics_path) else ".", exist_ok=True)
-    
-    # Build the diagnostics report as a list of lines
-    lines = []
-    
-    lines.append("")
-    lines.append("=" * 100)
-    lines.append(f"SOLVER DIAGNOSTICS - {pass_name}")
-    lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append("=" * 100)
-    
-    # ==================== BASIC STATISTICS ====================
-    lines.append("")
-    lines.append("BASIC STATISTICS:")
-    lines.append(f"   Status:              {solver.StatusName(status)}")
-    lines.append(f"   Wall time:           {solver.WallTime():.2f} seconds")
-    lines.append(f"   User time:           {solver.UserTime():.2f} seconds")
-    
-    # ==================== SEARCH STATISTICS ====================
-    lines.append("")
-    lines.append("SEARCH STATISTICS:")
-    lines.append(f"   Branches:            {solver.NumBranches():,}")
-    lines.append(f"   Conflicts:           {solver.NumConflicts():,}")
-    
-    # ==================== OBJECTIVE INFORMATION ====================
-    if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        obj_value = solver.ObjectiveValue()
-        best_bound = solver.BestObjectiveBound()
-        gap = abs(obj_value - best_bound)
-        gap_percent = (gap / max(abs(obj_value), 1)) * 100 if obj_value != 0 else 0
-        
-        lines.append("")
-        lines.append("OBJECTIVE:")
-        lines.append(f"   Current value:       {obj_value:,}")
-        lines.append(f"   Best bound:          {best_bound:,}")
-        lines.append(f"   Gap:                 {gap:,} ({gap_percent:.2f}%)")
-        
-        if status == cp_model.OPTIMAL:
-            lines.append(f"   [OPTIMAL] - Proven best solution!")
-        else:
-            lines.append(f"   [FEASIBLE] - Not proven optimal")
-            lines.append(f"   Need to close gap of {gap:,} to prove optimality")
-    
-    # ==================== MODEL SIZE ====================
-    lines.append("")
-    lines.append("MODEL SIZE:")
-    proto = model.Proto()
-    lines.append(f"   Variables:           {len(proto.variables):,}")
-    lines.append(f"   Constraints:         {len(proto.constraints):,}")
-    
-    # Count constraint types
-    constraint_types = {}
-    for c in proto.constraints:
-        c_type = c.WhichOneof('constraint')
-        constraint_types[c_type] = constraint_types.get(c_type, 0) + 1
-    
-    lines.append("")
-    lines.append("   Constraint breakdown:")
-    for c_type, count in sorted(constraint_types.items(), key=lambda x: -x[1])[:15]:
-        lines.append(f"      {c_type}: {count:,}")
-    
-    # ==================== EFFICIENCY METRICS ====================
-    if solver.WallTime() > 0:
-        branches_per_sec = solver.NumBranches() / solver.WallTime()
-        conflicts_per_sec = solver.NumConflicts() / solver.WallTime()
-        
-        lines.append("")
-        lines.append("EFFICIENCY METRICS:")
-        lines.append(f"   Branches/second:     {branches_per_sec:,.0f}")
-        lines.append(f"   Conflicts/second:    {conflicts_per_sec:,.0f}")
-        
-        # Conflict ratio
-        if solver.NumBranches() > 0:
-            conflict_ratio = solver.NumConflicts() / solver.NumBranches() * 100
-            lines.append(f"   Conflict ratio:      {conflict_ratio:.2f}%")
-    
-    # ==================== INTERPRETATION ====================
-    lines.append("")
-    lines.append("INTERPRETATION:")
-    
-    if solver.WallTime() > 0:
-        conflicts_per_sec = solver.NumConflicts() / solver.WallTime()
-        branches_per_sec = solver.NumBranches() / solver.WallTime()
-        
-        # Conflict rate interpretation
-        if conflicts_per_sec < 100:
-            lines.append(f"   [WARNING] Very low conflict rate ({conflicts_per_sec:.0f}/s) - solver may be stuck")
-            lines.append(f"       Possible causes: complex propagation, weak bounds")
-        elif conflicts_per_sec < 1000:
-            lines.append(f"   [INFO] Low conflict rate ({conflicts_per_sec:.0f}/s) - heavy propagation per conflict")
-        elif conflicts_per_sec > 50000:
-            lines.append(f"   [WARNING] Very high conflict rate ({conflicts_per_sec:.0f}/s) - may be thrashing")
-            lines.append(f"       Possible causes: tightly coupled constraints, poor search heuristics")
-        else:
-            lines.append(f"   [OK] Normal conflict rate ({conflicts_per_sec:.0f}/s)")
-        
-        # Branch rate interpretation
-        if branches_per_sec < 1000:
-            lines.append(f"   [WARNING] Low branch rate ({branches_per_sec:.0f}/s) - slow constraint evaluation")
-        elif branches_per_sec > 100000:
-            lines.append(f"   [OK] High branch rate ({branches_per_sec:.0f}/s) - efficient search")
-        else:
-            lines.append(f"   [OK] Moderate branch rate ({branches_per_sec:.0f}/s)")
-    
-    # Status-specific interpretation
-    if status == cp_model.FEASIBLE:
-        lines.append("")
-        lines.append("WHY NOT OPTIMAL?")
-        lines.append("   The solver found a solution but couldn't prove it's the best.")
-        lines.append("   Possible reasons:")
-        lines.append("   1. Time limit reached before proof completed")
-        lines.append("   2. Model has too many variables/constraints for quick proof")
-        lines.append("   3. Objective function has many near-optimal solutions")
-        lines.append("   4. Large gap between current solution and lower bound")
-        if solver.WallTime() > 0:
-            gap = abs(solver.ObjectiveValue() - solver.BestObjectiveBound())
-            if gap > 0:
-                time_per_gap = solver.WallTime() / max(1, gap)
-                lines.append(f"")
-                lines.append(f"   Estimated time to close gap: ~{gap * time_per_gap / 60:.1f} more minutes")
-    
-    lines.append("=" * 100)
-    lines.append("")
-    
-    # Write to file (append mode to capture both passes)
-    with open(diagnostics_path, "a", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-    
-    # Also print a brief summary to terminal
-    print(f"\n[Diagnostics] {pass_name}: {solver.StatusName(status)} in {solver.WallTime():.2f}s")
-    if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        gap = abs(solver.ObjectiveValue() - solver.BestObjectiveBound())
-        print(f"[Diagnostics] Objective: {solver.ObjectiveValue():,} | Gap: {gap:,} | Branches: {solver.NumBranches():,}")
-    print(f"[Diagnostics] Full report saved to: {diagnostics_path}")
 
 class SolutionPrinterCallback(cp_model.CpSolverSolutionCallback):
     """Prints intermediate solutions with progress metrics and logs to file."""
@@ -376,374 +216,6 @@ class SolutionPrinterCallback(cp_model.CpSolverSolutionCallback):
 # Note: print_ghost_grid_debug function has been moved to timeslot_system/debug/ghost_grid_exporter.py
 # It is imported at the top of this file as ghost_grid_debug
 
-
-def print_all_meetings_debug(meetings, assigned_faculty, assigned_room, section_assignments, 
-                              faculty, rooms, batches, subjects_map, config, solver,
-                              output_dir=None, pass_name=""):
-    """
-    Exports all meetings (active and inactive) in a scannable table format.
-    Each row is a subject/section showing duration for each day.
-    
-    Args:
-        meetings: Dict of (subject_id, section, day) -> meeting info
-        assigned_faculty: Dict of (subject_id, section) -> faculty index
-        assigned_room: Dict of (subject_id, section) -> room index
-        section_assignments: Dict of (subject_id, section, batch_idx) -> student count
-        faculty: List of faculty objects
-        rooms: List of room objects
-        batches: List of batch objects
-        subjects_map: Dict of subject_id -> Subject object
-        config: Configuration dict
-        solver: CP-SAT solver instance
-        output_dir: Directory to write file
-        pass_name: Name of the pass (e.g., "pass1", "pass2")
-    """
-    filename = f"all_meetings_{pass_name}.txt" if pass_name else "all_meetings.txt"
-    if output_dir:
-        filepath = os.path.join(output_dir, filename)
-    else:
-        filepath = filename
-    
-    DUMMY_FACULTY_IDX = len(faculty)
-    DUMMY_ROOM_IDX = len(rooms)
-    
-    # Group meetings by subject and section
-    meetings_by_section = {}
-    for (sub_id, s, d_idx), mtg in meetings.items():
-        key = (sub_id, s)
-        if key not in meetings_by_section:
-            meetings_by_section[key] = {}
-        meetings_by_section[key][d_idx] = mtg
-    
-    with open(filepath, 'w', encoding='utf-8') as f:
-        f.write("=" * 180 + "\n")
-        f.write(f"ALL MEETINGS OVERVIEW - {pass_name.upper()}\n")
-        f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write("=" * 180 + "\n\n")
-        
-        # Header
-        day_names = config["SCHEDULING_DAYS"]
-        f.write(f"{'Subject':>12s} | {'Sec':>3s} | ")
-        for day in day_names:
-            f.write(f"{day[:3]:>8s} | ")
-        f.write(f"{'Faculty':>20s} | {'Status':>6s}\n")
-        
-        f.write(f"{'-'*12} | {'-'*3} | ")
-        for _ in day_names:
-            f.write(f"{'-'*8} | ")
-        f.write(f"{'-'*20} | {'-'*6}\n")
-        
-        # Data rows
-        total_sections = 0
-        sections_with_meetings = 0
-        
-        for (sub_id, s), day_meetings in sorted(meetings_by_section.items()):
-            total_sections += 1
-            subject = subjects_map.get(sub_id)
-            
-            # Get assigned faculty
-            faculty_idx = solver.Value(assigned_faculty[(sub_id, s)])
-            if faculty_idx == DUMMY_FACULTY_IDX:
-                faculty_name = "UNASSIGNED"
-            else:
-                faculty_name = faculty[faculty_idx].name
-            
-            # Collect durations for each day
-            durations = []
-            has_active_meeting = False
-            
-            for d_idx in range(len(day_names)):
-                if d_idx in day_meetings:
-                    mtg = day_meetings[d_idx]
-                    is_active = solver.Value(mtg["is_active"])
-                    
-                    if is_active:
-                        duration = solver.Value(mtg["duration"])
-                        durations.append(duration)
-                        has_active_meeting = True
-                    else:
-                        durations.append(0)
-                else:
-                    durations.append(0)
-            
-            if has_active_meeting:
-                sections_with_meetings += 1
-                status = "has!"
-            else:
-                status = "none!"
-            
-            # Write row
-            f.write(f"{str(sub_id):>12s} | {s:>3d} | ")
-            for dur in durations:
-                f.write(f"{dur:>8d} | ")
-            f.write(f"{faculty_name:>20s} | {status:>6s}\n")
-        
-        f.write("\n" + "=" * 180 + "\n")
-        
-        # Summary statistics
-        total_meetings = len(meetings)
-        active_meetings = sum(1 for mtg in meetings.values() if solver.Value(mtg["is_active"]) == 1)
-        inactive_meetings = total_meetings - active_meetings
-        
-        f.write(f"\nSUMMARY:\n")
-        f.write(f"  Total Sections:           {total_sections}\n")
-        f.write(f"  Sections with Meetings:   {sections_with_meetings}\n")
-        f.write(f"  Sections without Meetings: {total_sections - sections_with_meetings}\n")
-        f.write(f"  Total Meeting Slots:      {total_meetings}\n")
-        f.write(f"  Active Meetings:          {active_meetings}\n")
-        f.write(f"  Inactive Meetings:        {inactive_meetings}\n")
-        f.write(f"\n" + "=" * 180 + "\n")
-    
-    print(f"[Meeting Debug] {pass_name} exported to: {filepath}")
-
-
-def print_raw_violations(solver, results, faculty, batches, config, print_to_terminal=True, save_to_file=True, filename="violations_report.xlsx"):
-    """
-    Analyzes and reports all constraint violations in two categories:
-    1. STRUCTURAL VIOLATIONS (boolean slack variables from Pass 1)
-    2. SOFT CONSTRAINT PENALTIES (integer penalty trackers from Pass 2)
-    
-    - Terminal output shows RAW values of ALL indexes (not just violations)
-    - File output is a multi-sheet Excel file for data analysis
-    
-    Args:
-        solver: CpSolver instance used for evaluation
-        results: dictionary returned by run_scheduler containing violations
-        faculty: list of Faculty objects
-        batches: list of Batch objects
-        config: scheduler configuration dictionary (used for slot-to-time conversion)
-        print_to_terminal: toggle terminal output
-        save_to_file: toggle excel output
-        filename: excel filename
-    """
-    if not print_to_terminal and not save_to_file:
-        print("Violation report generation skipped as both terminal and file outputs are disabled.")
-        return
-
-    structural_terminal_lines = []
-    soft_terminal_lines = []
-    structural_excel_data = collections.defaultdict(list)
-    soft_excel_data = collections.defaultdict(list)
-    
-    if config is None:
-        raise ValueError("config is required to translate slot indices to time.")
-
-    violations = results.get("violations", {})
-    
-    # Get dummy indices for structural violation reporting
-    DUMMY_FACULTY_IDX = results.get("DUMMY_FACULTY_IDX")
-    DUMMY_ROOM_IDX = results.get("DUMMY_ROOM_IDX")
-
-    SLOT_SIZE = 10  # minutes per slot
-    day_start_minutes = config.get("DAY_START_MINUTES", 0)
-
-    def slot_to_time(slot_idx):
-        total_minutes = day_start_minutes + slot_idx * SLOT_SIZE
-        hours = total_minutes // 60
-        minutes = total_minutes % 60
-        period = "AM" if hours % 24 < 12 else "PM"
-        display_hour = hours % 12
-        if display_hour == 0:
-            display_hour = 12
-        return f"{display_hour}:{minutes:02d} {period}"
-
-    # ============================================================================
-    # SECTION 1: STRUCTURAL VIOLATIONS (Boolean Slack Variables from Pass 1)
-    # ============================================================================
-    
-    # 1a. Unassigned Faculty (Dummy Faculty Assignments)
-    v_type = "is_dummy_faculty"
-    dummy_faculty_data = violations.get("is_dummy_faculty", {})
-    for (sub_id, s_idx), var in sorted(dummy_faculty_data.items()):
-        if hasattr(var, 'Proto'):
-            value = solver.Value(var)
-            structural_terminal_lines.append(f"{v_type}: (sub: '{sub_id}', sec: {s_idx}) = {value}")
-            structural_excel_data[v_type].append({"subject_id": sub_id, "section_idx": s_idx, "value": value})
-    
-    # 1b. Unassigned Room (Dummy Room Assignments)
-    v_type = "is_dummy_room"
-    dummy_room_data = violations.get("is_dummy_room", {})
-    for (sub_id, s_idx), var in sorted(dummy_room_data.items()):
-        if hasattr(var, 'Proto'):
-            value = solver.Value(var)
-            structural_terminal_lines.append(f"{v_type}: (sub: '{sub_id}', sec: {s_idx}) = {value}")
-            structural_excel_data[v_type].append({"subject_id": sub_id, "section_idx": s_idx, "value": value})
-    
-    # 1c. Duration Violations (Weekly Hours Shortfall)
-    v_type = "duration_violations"
-    duration_data = violations.get("duration_violations", {})
-    for (sub_id, s_idx), var in sorted(duration_data.items()):
-        if hasattr(var, 'Proto'):
-            value = solver.Value(var)
-            structural_terminal_lines.append(f"{v_type}: (sub: '{sub_id}', sec: {s_idx}) = {value}")
-            structural_excel_data[v_type].append({"subject_id": sub_id, "section_idx": s_idx, "value": value})
-    
-    # 1d. Faculty Day Gaps (structural slack)
-    v_type = "faculty_day_gaps"
-    faculty_day_gap_data = violations.get("faculty_day_gaps", {})
-    for f_idx, flag_list in sorted(faculty_day_gap_data.items()):
-        for day_offset, var in enumerate(flag_list):
-            if hasattr(var, 'Proto'):
-                value = solver.Value(var)
-                # day_offset 0 = day 1 (Tuesday), day_offset 1 = day 2 (Wednesday), day_offset 2 = day 3 (Thursday)
-                actual_day = day_offset + 1
-                structural_terminal_lines.append(f"{v_type}: (f: {f_idx}, day: {actual_day}) = {value}")
-                structural_excel_data[v_type].append({"faculty_idx": f_idx, "day_idx": actual_day, "value": value})
-    
-    # 1e. Batch Day Gaps (structural slack)
-    v_type = "batch_day_gaps"
-    batch_day_gap_data = violations.get("batch_day_gaps", {})
-    for b_idx, flag_list in sorted(batch_day_gap_data.items()):
-        for day_offset, var in enumerate(flag_list):
-            if hasattr(var, 'Proto'):
-                value = solver.Value(var)
-                actual_day = day_offset + 1
-                structural_terminal_lines.append(f"{v_type}: (b: {b_idx}, day: {actual_day}) = {value}")
-                structural_excel_data[v_type].append({"batch_idx": b_idx, "day_idx": actual_day, "value": value})
-
-    # ============================================================================
-    # SECTION 2: SOFT CONSTRAINT PENALTIES (Integer Penalty Trackers from Pass 2)
-    # ============================================================================
-    
-    # 2a. Faculty Overload (minutes over max)
-    v_type = "faculty_overload"
-    for f_idx, var in enumerate(violations.get("faculty_overload", [])):
-        value = solver.Value(var)
-        soft_terminal_lines.append(f"{v_type}: (f: {f_idx}) = {value}")
-        soft_excel_data[v_type].append({"faculty_idx": f_idx, "value": value})
-    
-    # 2a2. Faculty Underfill (minutes under min)
-    v_type = "faculty_underfill"
-    for f_idx, var in enumerate(violations.get("faculty_underfill", [])):
-        value = solver.Value(var)
-        soft_terminal_lines.append(f"{v_type}: (f: {f_idx}) = {value}")
-        soft_excel_data[v_type].append({"faculty_idx": f_idx, "value": value})
-
-    # 2b. Room Overcapacity
-    v_type = "room_overcapacity"
-    for (sub_id, s_idx), var in sorted(violations.get("room_overcapacity", {}).items()):
-        value = solver.Value(var)
-        soft_terminal_lines.append(f"{v_type}: (sub: '{sub_id}', sec: {s_idx}) = {value}")
-        soft_excel_data[v_type].append({"subject_id": sub_id, "section_idx": s_idx, "value": value})
-
-    # 2c. Section Overfill
-    v_type = "section_overfill"
-    for (sub_id, s_idx), var in sorted(violations.get("section_overfill", {}).items()):
-        value = solver.Value(var)
-        soft_terminal_lines.append(f"{v_type}: (sub: '{sub_id}', sec: {s_idx}) = {value}")
-        soft_excel_data[v_type].append({"subject_id": sub_id, "section_idx": s_idx, "value": value})
-
-    # 2d. Section Underfill
-    v_type = "section_underfill"
-    for (sub_id, s_idx), var in sorted(violations.get("section_underfill", {}).items()):
-        value = solver.Value(var)
-        soft_terminal_lines.append(f"{v_type}: (sub: '{sub_id}', sec: {s_idx}) = {value}")
-        soft_excel_data[v_type].append({"subject_id": sub_id, "section_idx": s_idx, "value": value})
-
-    # 2e. Nested soft constraint violations (continuous class, gaps, minimum blocks, non-preferred)
-    nested_soft_violations = {
-        "faculty_excess_gaps": violations.get("faculty_excess_gaps", {}),
-        "batch_excess_gaps": violations.get("batch_excess_gaps", {}),
-        "faculty_under_minimum_block": violations.get("faculty_under_minimum_block", {}),
-        "batch_under_minimum_block": violations.get("batch_under_minimum_block", {}),
-    }
-
-    for v_type, data in sorted(nested_soft_violations.items()):
-        for entity_idx, day_data in sorted(data.items()):
-            for day_idx, slot_vars in sorted(day_data.items()):
-                for slot_idx, var in enumerate(slot_vars):
-                    if hasattr(var, 'Proto'):
-                        value = solver.Value(var)
-                        soft_terminal_lines.append(f"{v_type}: (e: {entity_idx}, d: {day_idx}, s: {slot_idx}) = {value}")
-                        soft_excel_data[v_type].append({
-                            "entity_idx": entity_idx,
-                            "day_idx": day_idx,
-                            "slot_idx": slot_idx,
-                            "slot_time": slot_to_time(slot_idx),
-                            "value": value
-                        })
-
-    # 2f. Non-preferred subject assignments (special nested structure: f_idx -> sub_id -> list)
-    v_type = "faculty_non_preferred_subject"
-    non_pref_data = violations.get("faculty_non_preferred_subject", {})
-    for f_idx, sub_data in sorted(non_pref_data.items()):
-        for sub_id, var_list in sorted(sub_data.items()):
-            for sec_idx, var in enumerate(var_list):
-                if hasattr(var, 'Proto'):
-                    value = solver.Value(var)
-                    soft_terminal_lines.append(f"{v_type}: (f: {f_idx}, sub: '{sub_id}', sec: {sec_idx}) = {value}")
-                    soft_excel_data[v_type].append({
-                        "faculty_idx": f_idx,
-                        "subject_id": sub_id,
-                        "section_idx": sec_idx,
-                        "value": value
-                    })
-
-    # ============================================================================
-    # OUTPUT GENERATION
-    # ============================================================================
-    
-    if save_to_file:
-        # Save structural violations to separate file
-        structural_filename = filename.replace(".xlsx", "_structural.xlsx")
-        soft_filename = filename.replace(".xlsx", "_soft.xlsx")
-        
-        if structural_excel_data:
-            try:
-                with pd.ExcelWriter(structural_filename, engine='openpyxl') as writer:
-                    for v_type, records in sorted(structural_excel_data.items()):
-                        df = pd.DataFrame(records)
-                        safe_sheet_name = v_type.replace('_', ' ').title()[:31]
-                        df.to_excel(writer, sheet_name=safe_sheet_name, index=False)
-                print(f"\nStructural violations saved to: {structural_filename}")
-            except Exception as e:
-                print(f"\nERROR saving structural violations: {e}")
-        else:
-            print("\nNo structural violation data to save.")
-        
-        if soft_excel_data:
-            try:
-                with pd.ExcelWriter(soft_filename, engine='openpyxl') as writer:
-                    for v_type, records in sorted(soft_excel_data.items()):
-                        df = pd.DataFrame(records)
-                        safe_sheet_name = v_type.replace('_', ' ').title()[:31]
-                        df.to_excel(writer, sheet_name=safe_sheet_name, index=False)
-                print(f"Soft constraint penalties saved to: {soft_filename}")
-            except Exception as e:
-                print(f"\nERROR saving soft constraint penalties: {e}")
-        else:
-            print("No soft constraint penalty data to save.")
-
-    if print_to_terminal:
-        # Print structural violations
-        print("\n" + "="*70)
-        print("--- RAW STRUCTURAL VIOLATIONS (Boolean Slack Variables - Pass 1) ---")
-        print("="*70)
-        if not structural_terminal_lines:
-            print("No structural slack variables found.")
-        else:
-            for line in structural_terminal_lines:
-                print(line)
-        
-        # Count actual violations
-        structural_violation_count = sum(1 for line in structural_terminal_lines if "= 1" in line)
-        print(f"\nTotal structural violations (value=1): {structural_violation_count}")
-        print("="*70)
-        
-        # Print soft constraint penalties
-        print("\n" + "="*70)
-        print("--- RAW SOFT CONSTRAINT PENALTIES (Integer Trackers - Pass 2) ---")
-        print("="*70)
-        if not soft_terminal_lines:
-            print("No soft constraint penalty trackers found.")
-        else:
-            for line in soft_terminal_lines:
-                print(line)
-        
-        # Count non-zero penalties
-        soft_violation_count = sum(1 for line in soft_terminal_lines if not line.endswith("= 0"))
-        print(f"\nTotal non-zero soft penalties: {soft_violation_count}")
-        print("="*70)
 
 def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_limit=None, random_seed=None, deterministic_mode=False, output_folder=None, pass_mode="full", structural_limit=None, pass1_hints=None):
     """
@@ -1128,22 +600,22 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
     # Uncomment ONE of the following controller options (use triple quotes to toggle):
     
     # OPTION 1: Ghost Block Controller (indirect vacancy tracking via collision physics)
-    controller_data = apply_ghostblock_controller(
+    """ controller_data = apply_ghostblock_controller(
         model, timeslot_data, faculty, batches,
         intervals_per_faculty, intervals_per_batch,
         is_assigned_faculty_map, is_assigned_batch_map,
         active_for_faculty_map, active_for_batch_map,
         meetings, faculty_qualified_subjects
-    )
+    ) """
     
     # OPTION 2: Slot Oracle Controller (slots query meetings for coverage)
-    """ from timeslot_system.controllers import apply_slot_oracle_controller
+    from timeslot_system.controllers.slot_oracle_controller import apply_slot_oracle_controller
     controller_data = apply_slot_oracle_controller(
         model, timeslot_data, faculty, batches,
+        meetings, faculty_qualified_subjects,
         is_assigned_faculty_map, is_assigned_batch_map,
-        active_for_faculty_map, active_for_batch_map,
-        meetings, faculty_qualified_subjects
-    ) """
+        active_for_faculty_map, active_for_batch_map
+    )
    
     # Extract results from controller (both controllers return same structure)
     faculty_ghost_grid = controller_data['faculty_ghost_grid']
@@ -1994,20 +1466,35 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
         solution_printer_pass1.write_stats_summary(os.path.join(log_dir, "solver_stats_pass1.txt"))
         print(f"\nPass 1 Status: {solver.StatusName(status_pass1)}")
         
-        # Export debug files for Pass 1 (regardless of status)
-        # DRS debug export removed - was causing NameError
-        
-        # Ghost Grid Debug - Pass 1
-        ghost_grid_debug(faculty_ghost_grid, batch_ghost_grid, faculty, batches, config, 
-                              solver, faculty_active_streak, faculty_vacant_streak,
-                              batch_active_streak, batch_vacant_streak,
-                              faculty_block_ends, batch_block_ends,
-                              faculty_gap_ends_here, batch_gap_ends_here,
-                              output_dir=log_dir, pass_name="pass1")
-        
-        print_all_meetings_debug(meetings, assigned_faculty, assigned_room, section_assignments,
-                                 faculty, rooms, batches, subjects_map, config, solver,
-                                 output_dir=log_dir, pass_name="pass1")
+        # Only export debug files if we have a solution
+        if status_pass1 in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+            # Export debug files for Pass 1
+            # Controller Debug Export - Pass 1 (adapts to ghostblock or slot_oracle)
+            export_controller_debug(
+                controller_data=controller_data,
+                solver=solver,
+                faculty=faculty,
+                batches=batches,
+                config=config,
+                streak_data={
+                    'faculty_active_streak': faculty_active_streak,
+                    'faculty_vacant_streak': faculty_vacant_streak,
+                    'batch_active_streak': batch_active_streak,
+                    'batch_vacant_streak': batch_vacant_streak,
+                    'faculty_block_ends': faculty_block_ends,
+                    'batch_block_ends': batch_block_ends,
+                    'faculty_gap_ends_here': faculty_gap_ends_here,
+                    'batch_gap_ends_here': batch_gap_ends_here
+                },
+                output_dir=log_dir,
+                pass_name="pass1"
+            )
+            
+            print_all_meetings_debug(meetings, assigned_faculty, assigned_room, section_assignments,
+                                     faculty, rooms, batches, subjects_map, config, solver,
+                                     output_dir=log_dir, pass_name="pass1")
+        else:
+            print(f"⚠️  Pass 1 {solver.StatusName(status_pass1)} - Skipping debug exports (no solution to export)")
         
         if status_pass1 not in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
             print("Pass 1 failed to find a feasible solution!")
@@ -2156,20 +1643,35 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
     
     print(f"\nSolution log exported to: {log_file_path_pass2}")
     
-    # Export debug files for Pass 2
-    # DRS debug export removed - was causing NameError
-    
-    # Ghost Grid Debug - Pass 2
-    ghost_grid_debug(faculty_ghost_grid, batch_ghost_grid, faculty, batches, config, 
-                          solver, faculty_active_streak, faculty_vacant_streak,
-                          batch_active_streak, batch_vacant_streak,
-                          faculty_block_ends, batch_block_ends,
-                          faculty_gap_ends_here, batch_gap_ends_here,
-                          output_dir=log_dir, pass_name="pass2")
-    
-    print_all_meetings_debug(meetings, assigned_faculty, assigned_room, section_assignments,
-                             faculty, rooms, batches, subjects_map, config, solver,
-                             output_dir=log_dir, pass_name="pass2")
+    # Only export debug files if we have a solution
+    if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+        # Export debug files for Pass 2
+        # Controller Debug Export - Pass 2 (adapts to ghostblock or slot_oracle)
+        export_controller_debug(
+            controller_data=controller_data,
+            solver=solver,
+            faculty=faculty,
+            batches=batches,
+            config=config,
+            streak_data={
+                'faculty_active_streak': faculty_active_streak,
+                'faculty_vacant_streak': faculty_vacant_streak,
+                'batch_active_streak': batch_active_streak,
+                'batch_vacant_streak': batch_vacant_streak,
+                'faculty_block_ends': faculty_block_ends,
+                'batch_block_ends': batch_block_ends,
+                'faculty_gap_ends_here': faculty_gap_ends_here,
+                'batch_gap_ends_here': batch_gap_ends_here
+            },
+            output_dir=log_dir,
+            pass_name="pass2"
+        )
+        
+        print_all_meetings_debug(meetings, assigned_faculty, assigned_room, section_assignments,
+                                 faculty, rooms, batches, subjects_map, config, solver,
+                                 output_dir=log_dir, pass_name="pass2")
+    else:
+        print(f"⚠️  Pass 2 {solver.StatusName(status)} - Skipping debug exports (no solution to export)")
     #================================== END OF LEXICOGRAPHIC OPTIMIZATION ==================================
 
     return status, solver, {

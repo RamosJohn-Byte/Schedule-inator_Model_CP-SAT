@@ -649,3 +649,123 @@ def export_soft_time_violations_detailed(solver, results, config, faculty, batch
             print(f"[Soft Violations] Batch excess gaps exported to: {filepath}")
         else:
             print(f"[Soft Violations] Batch excess gaps: No violations found")
+
+
+def print_all_meetings_debug(meetings, assigned_faculty, assigned_room, section_assignments, 
+                              faculty, rooms, batches, subjects_map, config, solver,
+                              output_dir=None, pass_name=""):
+    """
+    Exports all meetings (active and inactive) in a scannable table format.
+    Each row is a subject/section showing duration for each day.
+    
+    Args:
+        meetings: Dict of (subject_id, section, day) -> meeting info
+        assigned_faculty: Dict of (subject_id, section) -> faculty index
+        assigned_room: Dict of (subject_id, section) -> room index
+        section_assignments: Dict of (subject_id, section, batch_idx) -> student count
+        faculty: List of faculty objects
+        rooms: List of room objects
+        batches: List of batch objects
+        subjects_map: Dict of subject_id -> Subject object
+        config: Configuration dict
+        solver: CP-SAT solver instance
+        output_dir: Directory to write file
+        pass_name: Name of the pass (e.g., "pass1", "pass2")
+    """
+    filename = f"all_meetings_{pass_name}.txt" if pass_name else "all_meetings.txt"
+    if output_dir:
+        filepath = os.path.join(output_dir, filename)
+    else:
+        filepath = filename
+    
+    DUMMY_FACULTY_IDX = len(faculty)
+    DUMMY_ROOM_IDX = len(rooms)
+    
+    # Group meetings by subject and section
+    meetings_by_section = {}
+    for (sub_id, s, d_idx), mtg in meetings.items():
+        key = (sub_id, s)
+        if key not in meetings_by_section:
+            meetings_by_section[key] = {}
+        meetings_by_section[key][d_idx] = mtg
+    
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write("=" * 180 + "\n")
+        f.write(f"ALL MEETINGS OVERVIEW - {pass_name.upper()}\n")
+        f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("=" * 180 + "\n\n")
+        
+        # Header
+        day_names = config["SCHEDULING_DAYS"]
+        f.write(f"{'Subject':>12s} | {'Sec':>3s} | ")
+        for day in day_names:
+            f.write(f"{day[:3]:>8s} | ")
+        f.write(f"{'Faculty':>20s} | {'Status':>6s}\n")
+        
+        f.write(f"{'-'*12} | {'-'*3} | ")
+        for _ in day_names:
+            f.write(f"{'-'*8} | ")
+        f.write(f"{'-'*20} | {'-'*6}\n")
+        
+        # Data rows
+        total_sections = 0
+        sections_with_meetings = 0
+        
+        for (sub_id, s), day_meetings in sorted(meetings_by_section.items()):
+            total_sections += 1
+            subject = subjects_map.get(sub_id)
+            
+            # Get assigned faculty
+            faculty_idx = solver.Value(assigned_faculty[(sub_id, s)])
+            if faculty_idx == DUMMY_FACULTY_IDX:
+                faculty_name = "UNASSIGNED"
+            else:
+                faculty_name = faculty[faculty_idx].name
+            
+            # Collect durations for each day
+            durations = []
+            has_active_meeting = False
+            
+            for d_idx in range(len(day_names)):
+                if d_idx in day_meetings:
+                    mtg = day_meetings[d_idx]
+                    is_active = solver.Value(mtg["is_active"])
+                    
+                    if is_active:
+                        duration = solver.Value(mtg["duration"])
+                        durations.append(duration)
+                        has_active_meeting = True
+                    else:
+                        durations.append(0)
+                else:
+                    durations.append(0)
+            
+            if has_active_meeting:
+                sections_with_meetings += 1
+                status = "has!"
+            else:
+                status = "none!"
+            
+            # Write row
+            f.write(f"{str(sub_id):>12s} | {s:>3d} | ")
+            for dur in durations:
+                f.write(f"{dur:>8d} | ")
+            f.write(f"{faculty_name:>20s} | {status:>6s}\n")
+        
+        f.write("\n" + "=" * 180 + "\n")
+        
+        # Summary statistics
+        total_meetings = len(meetings)
+        active_meetings = sum(1 for mtg in meetings.values() if solver.Value(mtg["is_active"]) == 1)
+        inactive_meetings = total_meetings - active_meetings
+        
+        f.write(f"\nSUMMARY:\n")
+        f.write(f"  Total Sections:           {total_sections}\n")
+        f.write(f"  Sections with Meetings:   {sections_with_meetings}\n")
+        f.write(f"  Sections without Meetings: {total_sections - sections_with_meetings}\n")
+        f.write(f"  Total Meeting Slots:      {total_meetings}\n")
+        f.write(f"  Active Meetings:          {active_meetings}\n")
+        f.write(f"  Inactive Meetings:        {inactive_meetings}\n")
+        f.write(f"\n" + "=" * 180 + "\n")
+    
+    print(f"[Meeting Debug] {pass_name} exported to: {filepath}")

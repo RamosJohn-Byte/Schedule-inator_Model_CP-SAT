@@ -84,26 +84,49 @@ def apply_slot_oracle_controller(model, timeslot_data, faculty, batches,
             
             faculty_slot_grid[(f_idx, day_idx)] = slots
     
-    # Same for batches
+    # Same for batches - pre-mark external meeting slots
     for b_idx, batch in enumerate(batches):
         for day_idx in range(len(config["SCHEDULING_DAYS"])):
             num_slots = calculate_slots_for_day(day_idx, config)
             day_offset = day_idx * MINUTES_IN_A_DAY
             day_start_abs = config["DAY_START_MINUTES"] + day_offset
             
+            # Pre-compute which slots are covered by external meetings
+            external_covered_slots = set()
+            for ext_meeting in batch.external_meetings:
+                if ext_meeting.day_index == day_idx:
+                    ext_start = ext_meeting.start_minutes + day_offset
+                    ext_end = ext_meeting.end_minutes + day_offset
+                    
+                    # Find all slots overlapping this external meeting
+                    for slot_idx in range(num_slots):
+                        slot_start = day_start_abs + (slot_idx * TIME_GRANULARITY)
+                        slot_end = slot_start + TIME_GRANULARITY
+                        
+                        if ext_start < slot_end and ext_end > slot_start:
+                            external_covered_slots.add(slot_idx)
+            
             slots = []
             for slot_idx in range(num_slots):
                 slot_start = day_start_abs + (slot_idx * TIME_GRANULARITY)
                 slot_end = slot_start + TIME_GRANULARITY
                 
-                time_slot = model.NewBoolVar(f"timeslot_b{b_idx}_d{day_idx}_s{slot_idx}")
+                # If covered by external meeting, create a BoolVar fixed to 1
+                is_external = slot_idx in external_covered_slots
+                if is_external:
+                    # Must use BoolVar (not Constant) because streak_tracker uses .Not()
+                    time_slot = model.NewBoolVar(f"timeslot_b{b_idx}_d{day_idx}_s{slot_idx}_ext")
+                    model.Add(time_slot == 1)  # Force to always be occupied
+                else:
+                    time_slot = model.NewBoolVar(f"timeslot_b{b_idx}_d{day_idx}_s{slot_idx}")
                 
                 slots.append({
                     "slot_idx": slot_idx,
                     "time_slot": time_slot,
                     "start_abs": slot_start,
                     "end_abs": slot_end,
-                    "covering_meetings": []
+                    "covering_meetings": [],
+                    "is_external": is_external
                 })
             
             batch_slot_grid[(b_idx, day_idx)] = slots
@@ -217,6 +240,10 @@ def apply_slot_oracle_controller(model, timeslot_data, faculty, batches,
                     slots = batch_slot_grid[(b_idx, day_idx)]
                     
                     for slot in slots:
+                        # Skip coverage detection for external meeting slots
+                        if slot.get("is_external", False):
+                            continue
+                        
                         slot_start = slot["start_abs"]
                         slot_end = slot["end_abs"]
                         
@@ -249,26 +276,6 @@ def apply_slot_oracle_controller(model, timeslot_data, faculty, batches,
                         
                         slot["covering_meetings"].append(meeting_covers_slot)
                         total_batch_coverage_vars += 3
-        
-        # Also add external meetings for batches
-        for ext_meeting in batch.external_meetings:
-            day_idx = ext_meeting.day_index
-            
-            # External meetings have FIXED start/end (constants)
-            ext_start = ext_meeting.start_minutes + (day_idx * MINUTES_IN_A_DAY)
-            ext_end = ext_meeting.end_minutes + (day_idx * MINUTES_IN_A_DAY)
-            
-            slots = batch_slot_grid[(b_idx, day_idx)]
-            
-            for slot in slots:
-                slot_start = slot["start_abs"]
-                slot_end = slot["end_abs"]
-                
-                # Check overlap with constants (simpler - no BoolVars needed)
-                if ext_start < slot_end and ext_end > slot_start:
-                    # External meeting ALWAYS covers this slot (create constant True)
-                    always_true = model.NewConstant(1)
-                    slot["covering_meetings"].append(always_true)
     
     print(f"   Batch coverage variables: ~{total_batch_coverage_vars:,}")
     
@@ -308,6 +315,10 @@ def apply_slot_oracle_controller(model, timeslot_data, faculty, batches,
             slots = batch_slot_grid[(b_idx, day_idx)]
             
             for slot in slots:
+                # Skip external slots - already constrained to 1
+                if slot.get("is_external", False):
+                    continue
+                    
                 covering_meetings = slot["covering_meetings"]
                 time_slot = slot["time_slot"]
                 
@@ -331,6 +342,7 @@ def apply_slot_oracle_controller(model, timeslot_data, faculty, batches,
     timeslot_data['batch_data'] = batch_slot_grid
     
     return {
+        'controller_type': 'slot_oracle',
         'faculty_ghost_grid': faculty_slot_grid,
         'batch_ghost_grid': batch_slot_grid
     }
