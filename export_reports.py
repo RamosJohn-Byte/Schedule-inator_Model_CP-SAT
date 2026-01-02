@@ -206,9 +206,9 @@ def print_raw_violations(solver, results, faculty, batches, config, print_to_ter
                         df = pd.DataFrame(records)
                         safe_sheet_name = v_type.replace('_', ' ').title()[:31]
                         df.to_excel(writer, sheet_name=safe_sheet_name, index=False)
-                print(f"\n✓ Structural violations saved to: {structural_filename}")
+                print(f"\nStructural violations saved to: {structural_filename}")
             except Exception as e:
-                print(f"\n❌ Error saving structural violations: {e}")
+                print(f"\nError saving structural violations: {e}")
         else:
             print("\nNo structural violation data to save.")
         
@@ -219,9 +219,9 @@ def print_raw_violations(solver, results, faculty, batches, config, print_to_ter
                         df = pd.DataFrame(records)
                         safe_sheet_name = v_type.replace('_', ' ').title()[:31]
                         df.to_excel(writer, sheet_name=safe_sheet_name, index=False)
-                print(f"✓ Soft constraint penalties saved to: {soft_filename}")
+                print(f"Soft constraint penalties saved to: {soft_filename}")
             except Exception as e:
-                print(f"\n❌ Error saving soft constraint penalties: {e}")
+                print(f"\nError saving soft constraint penalties: {e}")
         else:
             print("No soft constraint penalty data to save.")
 
@@ -516,7 +516,7 @@ def generate_violation_report(solver, results, config, faculty, rooms, batches, 
             f.write("-" * 40 + "\n\n")
         
         if structural_count == 0:
-            f.write("✓ No structural violations - all hard constraints satisfied!\n\n")
+            f.write("No structural violations - all hard constraints satisfied!\n\n")
         else:
             f.write(f"\nTotal Structural Violations: {structural_count}\n")
         
@@ -573,11 +573,11 @@ def generate_violation_report(solver, results, config, faculty, rooms, batches, 
             
             # Determine status
             if total_mins > max_mins:
-                status = "⚠️ OVER MAX"
+                status = "OVER MAX"
             elif total_mins < min_mins and min_mins > 0:
-                status = "⚠️ UNDER MIN"
+                status = "UNDER MIN"
             else:
-                status = "✓ OK"
+                status = "OK"
             
             faculty_workload.append({
                 "name": fac.name,
@@ -753,68 +753,88 @@ def generate_violation_report(solver, results, config, faculty, rooms, batches, 
             for f_idx in results["violations"]["faculty_excess_gaps"]:
                 for day_idx in results["violations"]["faculty_excess_gaps"][f_idx]:
                     violation_list = results["violations"]["faculty_excess_gaps"][f_idx][day_idx]
-                    violation_slots = get_violation_slots(violation_list, solver)
                     
-                    if violation_slots:
-                        ranges = find_consecutive_ranges(violation_slots)
-                        for start_slot, end_slot in ranges:
-                            # Apply forward offset
-                            actual_start = start_slot + MAX_GAP_SLOTS
-                            actual_end = end_slot + MAX_GAP_SLOTS + 1
-                            
-                            start_time = slot_to_time(actual_start, config["DAY_START_MINUTES"])
-                            end_time = slot_to_time(actual_end, config["DAY_START_MINUTES"])
-                            
-                            violation_count = end_slot - start_slot + 1
-                            excess_mins = violation_count * SLOT_SIZE
-                            actual_gap = (MAX_GAP_SLOTS + violation_count) * SLOT_SIZE
-                            max_gap = MAX_GAP_SLOTS * SLOT_SIZE
-                            
-                            penalty = violation_count * config["ConstraintPenalties"]["EXCESS_GAP_PER_SLOT"]
-                            section_penalty += penalty
-                            
-                            day_name = config["SCHEDULING_DAYS"][day_idx][:3].capitalize()
-                            faculty_name = faculty[f_idx].name
-                            
-                            line = f"LONG-GAP {faculty_name} ({day_name} {start_time} - {end_time}) " \
-                                   f"by {format_time_duration(excess_mins)} " \
-                                   f"({format_time_duration(actual_gap)} > {format_time_duration(max_gap)}) " \
-                                   f"[Penalty: {penalty}]"
-                            violation_lines.append(line)
+                    # Build list of (slot_idx, excess_slots) for violations
+                    violations = []
+                    for slot_idx, var in enumerate(violation_list):
+                        excess_slots = solver.Value(var)
+                        if excess_slots > 0:
+                            violations.append((slot_idx, excess_slots))
+                    
+                    # Process each violation (gap ends at this slot)
+                    for slot_idx, excess_slots in violations:
+                        # Gap ends at slot_idx (class starts here)
+                        # Total gap = MAX_GAP_SLOTS + excess_slots
+                        # VIOLATION RANGE = only the excess portion (beyond acceptable gap)
+                        violation_start_slot = slot_idx - excess_slots
+                        violation_end_slot = slot_idx  # Class starts here
+                        
+                        start_time = slot_to_time(violation_start_slot, config["DAY_START_MINUTES"])
+                        end_time = slot_to_time(violation_end_slot, config["DAY_START_MINUTES"])
+                        
+                        excess_mins = excess_slots * SLOT_SIZE
+                        total_gap_slots = MAX_GAP_SLOTS + excess_slots
+                        actual_gap = total_gap_slots * SLOT_SIZE
+                        max_gap = MAX_GAP_SLOTS * SLOT_SIZE
+                        
+                        # Convert per-hour penalty to per-slot (matching solver logic)
+                        slots_per_hour = 60 / config["TIME_GRANULARITY_MINUTES"]
+                        penalty_per_slot = int(config["ConstraintPenalties"]["EXCESS_GAP_PER_HOUR"] / slots_per_hour)
+                        penalty = excess_slots * penalty_per_slot
+                        section_penalty += penalty
+                        
+                        day_name = config["SCHEDULING_DAYS"][day_idx][:3].capitalize()
+                        faculty_name = faculty[f_idx].name
+                        
+                        line = f"LONG-GAP {faculty_name} ({day_name} {start_time} - {end_time}) " \
+                               f"by {format_time_duration(excess_mins)} " \
+                               f"({format_time_duration(actual_gap)} > {format_time_duration(max_gap)}) " \
+                               f"[Penalty: {penalty}]"
+                        violation_lines.append(line)
         
         # Batch long gaps
         if "batch_excess_gaps" in results["violations"]:
             for b_idx in results["violations"]["batch_excess_gaps"]:
                 for day_idx in results["violations"]["batch_excess_gaps"][b_idx]:
                     violation_list = results["violations"]["batch_excess_gaps"][b_idx][day_idx]
-                    violation_slots = get_violation_slots(violation_list, solver)
                     
-                    if violation_slots:
-                        ranges = find_consecutive_ranges(violation_slots)
-                        for start_slot, end_slot in ranges:
-                            # Apply forward offset
-                            actual_start = start_slot + MAX_GAP_SLOTS
-                            actual_end = end_slot + MAX_GAP_SLOTS + 1
-                            
-                            start_time = slot_to_time(actual_start, config["DAY_START_MINUTES"])
-                            end_time = slot_to_time(actual_end, config["DAY_START_MINUTES"])
-                            
-                            violation_count = end_slot - start_slot + 1
-                            excess_mins = violation_count * SLOT_SIZE
-                            actual_gap = (MAX_GAP_SLOTS + violation_count) * SLOT_SIZE
-                            max_gap = MAX_GAP_SLOTS * SLOT_SIZE
-                            
-                            penalty = violation_count * config["ConstraintPenalties"]["EXCESS_GAP_PER_SLOT"]
-                            section_penalty += penalty
-                            
-                            day_name = config["SCHEDULING_DAYS"][day_idx][:3].capitalize()
-                            batch_name = batches[b_idx].batch_id
-                            
-                            line = f"LONG-GAP {batch_name} ({day_name} {start_time} - {end_time}) " \
-                                   f"by {format_time_duration(excess_mins)} " \
-                                   f"({format_time_duration(actual_gap)} > {format_time_duration(max_gap)}) " \
-                                   f"[Penalty: {penalty}]"
-                            violation_lines.append(line)
+                    # Build list of (slot_idx, excess_slots) for violations
+                    violations = []
+                    for slot_idx, var in enumerate(violation_list):
+                        excess_slots = solver.Value(var)
+                        if excess_slots > 0:
+                            violations.append((slot_idx, excess_slots))
+                    
+                    # Process each violation (gap ends at this slot)
+                    for slot_idx, excess_slots in violations:
+                        # Gap ends at slot_idx (class starts here)
+                        # Total gap = MAX_GAP_SLOTS + excess_slots
+                        # VIOLATION RANGE = only the excess portion (beyond acceptable gap)
+                        violation_start_slot = slot_idx - excess_slots
+                        violation_end_slot = slot_idx  # Class starts here
+                        
+                        start_time = slot_to_time(violation_start_slot, config["DAY_START_MINUTES"])
+                        end_time = slot_to_time(violation_end_slot, config["DAY_START_MINUTES"])
+                        
+                        excess_mins = excess_slots * SLOT_SIZE
+                        total_gap_slots = MAX_GAP_SLOTS + excess_slots
+                        actual_gap = total_gap_slots * SLOT_SIZE
+                        max_gap = MAX_GAP_SLOTS * SLOT_SIZE
+                        
+                        # Convert per-hour penalty to per-slot (matching solver logic)
+                        slots_per_hour = 60 / config["TIME_GRANULARITY_MINUTES"]
+                        penalty_per_slot = int(config["ConstraintPenalties"]["EXCESS_GAP_PER_HOUR"] / slots_per_hour)
+                        penalty = excess_slots * penalty_per_slot
+                        section_penalty += penalty
+                        
+                        day_name = config["SCHEDULING_DAYS"][day_idx][:3].capitalize()
+                        batch_name = batches[b_idx].batch_id
+                        
+                        line = f"LONG-GAP {batch_name} ({day_name} {start_time} - {end_time}) " \
+                               f"by {format_time_duration(excess_mins)} " \
+                               f"({format_time_duration(actual_gap)} > {format_time_duration(max_gap)}) " \
+                               f"[Penalty: {penalty}]"
+                        violation_lines.append(line)
         
         if violation_lines:
             f.write("LONG GAP VIOLATIONS\n")
@@ -839,22 +859,33 @@ def generate_violation_report(solver, results, config, faculty, rooms, batches, 
                 for day_idx in results["violations"]["faculty_under_minimum_block"][f_idx]:
                     violation_list = results["violations"]["faculty_under_minimum_block"][f_idx][day_idx]
                     
+                    # Iterate through violation list where index = slot position
                     for slot_idx, var in enumerate(violation_list):
                         deficiency_slots = solver.Value(var)
                         
                         if deficiency_slots > 0:
+                            # Block ends at slot_idx with deficiency
+                            actual_block_slots = MIN_BLOCK_SLOTS - deficiency_slots
+                            block_start_slot = slot_idx - actual_block_slots + 1
+                            block_end_slot = slot_idx + 1  # Exclusive end
+                            
+                            block_start_time = slot_to_time(block_start_slot, config["DAY_START_MINUTES"])
+                            block_end_time = slot_to_time(block_end_slot, config["DAY_START_MINUTES"])
+                            
                             deficiency_mins = deficiency_slots * SLOT_SIZE
-                            actual_block_mins = (MIN_BLOCK_SLOTS - deficiency_slots) * SLOT_SIZE
+                            actual_block_mins = actual_block_slots * SLOT_SIZE
                             min_block_mins = MIN_BLOCK_SLOTS * SLOT_SIZE
                             
-                            penalty = deficiency_slots * config["ConstraintPenalties"]["UNDER_MINIMUM_BLOCK_PER_SLOT"]
+                            # Convert per-hour penalty to per-slot (matching solver logic)
+                            slots_per_hour = 60 / config["TIME_GRANULARITY_MINUTES"]
+                            penalty_per_slot = int(config["ConstraintPenalties"]["UNDER_MINIMUM_BLOCK_PER_HOUR"] / slots_per_hour)
+                            penalty = deficiency_slots * penalty_per_slot
                             section_penalty += penalty
                             
                             day_name = config["SCHEDULING_DAYS"][day_idx][:3].capitalize()
                             faculty_name = faculty[f_idx].name
-                            block_start_time = slot_to_time(slot_idx, config["DAY_START_MINUTES"])
                             
-                            line = f"UNDER-MIN-BLOCK {faculty_name} ({day_name} {block_start_time}) " \
+                            line = f"UNDER-MIN-BLOCK {faculty_name} ({day_name} {block_start_time} - {block_end_time}) " \
                                    f"short by {format_time_duration(deficiency_mins)} " \
                                    f"({format_time_duration(actual_block_mins)} < {format_time_duration(min_block_mins)}) " \
                                    f"[Penalty: {penalty}]"
@@ -866,22 +897,33 @@ def generate_violation_report(solver, results, config, faculty, rooms, batches, 
                 for day_idx in results["violations"]["batch_under_minimum_block"][b_idx]:
                     violation_list = results["violations"]["batch_under_minimum_block"][b_idx][day_idx]
                     
+                    # Iterate through violation list where index = slot position
                     for slot_idx, var in enumerate(violation_list):
                         deficiency_slots = solver.Value(var)
                         
                         if deficiency_slots > 0:
+                            # Block ends at slot_idx with deficiency
+                            actual_block_slots = MIN_BLOCK_SLOTS - deficiency_slots
+                            block_start_slot = slot_idx - actual_block_slots + 1
+                            block_end_slot = slot_idx + 1  # Exclusive end
+                            
+                            block_start_time = slot_to_time(block_start_slot, config["DAY_START_MINUTES"])
+                            block_end_time = slot_to_time(block_end_slot, config["DAY_START_MINUTES"])
+                            
                             deficiency_mins = deficiency_slots * SLOT_SIZE
-                            actual_block_mins = (MIN_BLOCK_SLOTS - deficiency_slots) * SLOT_SIZE
+                            actual_block_mins = actual_block_slots * SLOT_SIZE
                             min_block_mins = MIN_BLOCK_SLOTS * SLOT_SIZE
                             
-                            penalty = deficiency_slots * config["ConstraintPenalties"]["UNDER_MINIMUM_BLOCK_PER_SLOT"]
+                            # Convert per-hour penalty to per-slot (matching solver logic)
+                            slots_per_hour = 60 / config["TIME_GRANULARITY_MINUTES"]
+                            penalty_per_slot = int(config["ConstraintPenalties"]["UNDER_MINIMUM_BLOCK_PER_HOUR"] / slots_per_hour)
+                            penalty = deficiency_slots * penalty_per_slot
                             section_penalty += penalty
                             
                             day_name = config["SCHEDULING_DAYS"][day_idx][:3].capitalize()
                             batch_name = batches[b_idx].batch_id
-                            block_start_time = slot_to_time(slot_idx, config["DAY_START_MINUTES"])
                             
-                            line = f"UNDER-MIN-BLOCK {batch_name} ({day_name} {block_start_time}) " \
+                            line = f"UNDER-MIN-BLOCK {batch_name} ({day_name} {block_start_time} - {block_end_time}) " \
                                    f"short by {format_time_duration(deficiency_mins)} " \
                                    f"({format_time_duration(actual_block_mins)} < {format_time_duration(min_block_mins)}) " \
                                    f"[Penalty: {penalty}]"

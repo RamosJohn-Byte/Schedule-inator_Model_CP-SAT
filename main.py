@@ -15,6 +15,7 @@ from scheduler import run_scheduler
 from utils import flush_print, create_output_folder, load_config
 from export_db import save_schedule_to_db, save_schedule_with_full_view
 from export_reports import print_raw_violations, generate_violation_report
+from export_debug import export_soft_time_violations_detailed
 
 
 # NOTE: The following functions have been moved to modular files:
@@ -29,16 +30,16 @@ def load_data(config, model):
     # Load lookup tables first
     try:
         df_room_types = pd.read_csv(f'{DATA_FOLDER}/room_types.csv')
-        print(f"âœ“ Successfully loaded {DATA_FOLDER}/room_types.csv")
+        print(f"Successfully loaded {DATA_FOLDER}/room_types.csv")
     except FileNotFoundError:
-        print(f"âš ï¸ WARNING: {DATA_FOLDER}/room_types.csv not found. Creating empty lookup.")
+        print(f"WARNING: {DATA_FOLDER}/room_types.csv not found. Creating empty lookup.")
         df_room_types = pd.DataFrame(columns=['id', 'name', 'description'])
     
     try:
         df_subject_types = pd.read_csv(f'{DATA_FOLDER}/subject_types.csv')
-        print(f"âœ“ Successfully loaded {DATA_FOLDER}/subject_types.csv")
+        print(f"Successfully loaded {DATA_FOLDER}/subject_types.csv")
     except FileNotFoundError:
-        print(f"âš ï¸ WARNING: {DATA_FOLDER}/subject_types.csv not found. Creating empty lookup.")
+        print(f"WARNING: {DATA_FOLDER}/subject_types.csv not found. Creating empty lookup.")
         df_subject_types = pd.DataFrame(columns=['id', 'name', 'description'])
     
     # Build lookup dictionaries
@@ -60,8 +61,8 @@ def load_data(config, model):
         )
         subject_types_map[st.id] = st
     
-    print(f"âœ“ Loaded {len(room_types_map)} room types")
-    print(f"âœ“ Loaded {len(subject_types_map)} subject types")
+    print(f"Loaded {len(room_types_map)} room types")
+    print(f"Loaded {len(subject_types_map)} subject types")
     
     # Load main entity tables
     df_faculty = pd.read_csv(f'{DATA_FOLDER}/faculty.csv')
@@ -72,31 +73,31 @@ def load_data(config, model):
     # --- Fail-safe for banned_times.csv ---
     try:
         df_banned_times = pd.read_csv(f'{DATA_FOLDER}/banned_times.csv', dtype={'start_time': str, 'end_time': str})
-        print(f"âœ“ Successfully loaded {DATA_FOLDER}/banned_times.csv")
+        print(f"Successfully loaded {DATA_FOLDER}/banned_times.csv")
     except FileNotFoundError:
-        print(f"âš ï¸ WARNING: {DATA_FOLDER}/banned_times.csv not found. Continuing without banned times.")
+        print(f"WARNING: {DATA_FOLDER}/banned_times.csv not found. Continuing without banned times.")
         # Create an empty DataFrame with the expected columns
         df_banned_times = pd.DataFrame(columns=['batch_id', 'day', 'start_time', 'end_time'])
     except pd.errors.EmptyDataError:
-        print(f"âš ï¸ WARNING: {DATA_FOLDER}/banned_times.csv is empty. Continuing without banned times.")
+        print(f"WARNING: {DATA_FOLDER}/banned_times.csv is empty. Continuing without banned times.")
         df_banned_times = pd.DataFrame(columns=['batch_id', 'day', 'start_time', 'end_time'])
     except Exception as e:
-        print(f"âŒ ERROR reading {DATA_FOLDER}/banned_times.csv: {e}. Continuing without banned times.")
+        print(f"ERROR reading {DATA_FOLDER}/banned_times.csv: {e}. Continuing without banned times.")
         df_banned_times = pd.DataFrame(columns=['batch_id', 'day', 'start_time', 'end_time'])
 
     # --- Fail-safe for external_meetings.csv ---
     try:
         df_external_meetings = pd.read_csv(f'{DATA_FOLDER}/external_meetings.csv', dtype={'start_time': str, 'end_time': str})
-        print(f"âœ“ Successfully loaded {DATA_FOLDER}/external_meetings.csv")
+        print(f"Successfully loaded {DATA_FOLDER}/external_meetings.csv")
     except FileNotFoundError:
-        print(f"âš ï¸ WARNING: {DATA_FOLDER}/external_meetings.csv not found. Continuing without external meetings.")
+        print(f"WARNING: {DATA_FOLDER}/external_meetings.csv not found. Continuing without external meetings.")
         # Create an empty DataFrame with the expected columns
         df_external_meetings = pd.DataFrame(columns=['batch_id', 'day', 'start_time', 'end_time', 'event_name', 'description'])
     except pd.errors.EmptyDataError:
-        print(f"âš ï¸ WARNING: {DATA_FOLDER}/external_meetings.csv is empty. Continuing without external meetings.")
+        print(f"WARNING: {DATA_FOLDER}/external_meetings.csv is empty. Continuing without external meetings.")
         df_external_meetings = pd.DataFrame(columns=['batch_id', 'day', 'start_time', 'end_time', 'event_name', 'description'])
     except Exception as e:
-        print(f"âŒ ERROR reading {DATA_FOLDER}/external_meetings.csv: {e}. Continuing without external meetings.")
+        print(f"ERROR reading {DATA_FOLDER}/external_meetings.csv: {e}. Continuing without external meetings.")
         df_external_meetings = pd.DataFrame(columns=['batch_id', 'day', 'start_time', 'end_time', 'event_name', 'description'])
 
     # --- The rest of your code continues below ---
@@ -360,7 +361,7 @@ def filter_infeasible_subjects(subjects, rooms, faculty, batches, config):
             removed_subjects.append(subject)
             removed_subject_ids.add(subject.subject_id)
             room_type_str = str(subject.room_type_id) if hasattr(subject, 'room_type_id') and subject.room_type_id else "None"
-            print(f"âŒ REMOVED: {subject.subject_id} (Room Type: {room_type_str})")
+            print(f"REMOVED: {subject.subject_id} (Room Type: {room_type_str})")
             print(f"   - No meetings scheduled: {not has_meetings}")
             print(f"   - No qualified faculty: {not has_qualified_faculty}")
             print(f"   - No enrolled batches: {not has_enrolled_batch}")
@@ -370,7 +371,7 @@ def filter_infeasible_subjects(subjects, rooms, faculty, batches, config):
     
     # Clean up references to removed subjects
     if removed_subject_ids:
-        print(f"\nðŸ§¹ Cleaning up references to {len(removed_subject_ids)} removed subjects...")
+        print(f"\nCleaning up references to {len(removed_subject_ids)} removed subjects...")
         
         # Remove from batch.subjects
         for batch in batches:
@@ -401,7 +402,7 @@ def filter_infeasible_subjects(subjects, rooms, faculty, batches, config):
                     print(f"   Faculty {fac.name}: Removed {removed_count} from qualified_subject_ids")
     
     print()
-    print(f"ðŸ“Š Summary:")
+    print(f"Summary:")
     print(f"   Total subjects: {len(subjects)}")
     print(f"   Removed: {len(removed_subjects)}")
     print(f"   Remaining: {len(filtered_subjects)}")
@@ -444,14 +445,14 @@ def run_two_pass_scheduler(config, subjects, rooms, faculty, batches, subjects_m
     )
     
     if status_pass1 not in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        print("âŒ Pass 1 failed! Cannot proceed to Pass 2.")
+        print("Pass 1 failed! Cannot proceed to Pass 2.")
         return status_pass1, solver_pass1, results_pass1
     
     structural_minimum = results_pass1.get("pass1_structural_violations", 0)
-    flush_print(f"\nâœ… Pass 1 complete! Structural minimum: {structural_minimum}")
+    flush_print(f"\nPass 1 complete! Structural minimum: {structural_minimum}")
     
     # Save Pass 1 outputs
-    flush_print("ðŸ“„ Generating Pass 1 violation report...")
+    flush_print("Generating Pass 1 violation report...")
     try:
         pass1_violation_report_path = os.path.join(output_folder, "pass1_violation_report.txt")
         generate_violation_report(
@@ -464,14 +465,14 @@ def run_two_pass_scheduler(config, subjects, rooms, faculty, batches, subjects_m
             subjects_map=subjects_map,
             output_file=pass1_violation_report_path
         )
-        flush_print(f"ðŸ“„ Pass 1 violation report saved")
+        flush_print(f"Pass 1 violation report saved")
     except Exception as e:
-        flush_print(f"âš ï¸ Error generating violation report: {e}")
+        flush_print(f"Error generating violation report: {e}")
         import traceback
         traceback.print_exc()
         sys.stdout.flush()
     
-    flush_print("ðŸ“Š Generating Pass 1 raw violations Excel...")
+    flush_print("Generating Pass 1 raw violations Excel...")
     try:
         pass1_raw_violations_path = os.path.join(output_folder, "pass1_raw_violations.xlsx")
         print_raw_violations(
@@ -484,9 +485,9 @@ def run_two_pass_scheduler(config, subjects, rooms, faculty, batches, subjects_m
             save_to_file=True,
             filename=pass1_raw_violations_path
         )
-        flush_print(f"ðŸ“Š Pass 1 raw violations saved")
+        flush_print(f"Pass 1 raw violations saved")
     except Exception as e:
-        flush_print(f"âš ï¸ Error generating raw violations: {e}")
+        flush_print(f"Error generating raw violations: {e}")
         import traceback
         traceback.print_exc()
         sys.stdout.flush()
@@ -494,13 +495,13 @@ def run_two_pass_scheduler(config, subjects, rooms, faculty, batches, subjects_m
     # ============================================================================
     # EXPORT PASS 1 SOLUTION TO DATABASE
     # ============================================================================
-    flush_print("ðŸ’¾ Exporting Pass 1 schedule to database...")
+    flush_print("Exporting Pass 1 schedule to database...")
     try:
         pass1_db_path = os.path.join(output_folder, "pass1_schedule.db")
         save_schedule_with_full_view(status_pass1, solver_pass1, results_pass1, config, subjects, rooms, faculty, batches, subjects_map, db_path=pass1_db_path)
-        flush_print(f"ðŸ’¾ Pass 1 schedule database saved to: {pass1_db_path}")
+        flush_print(f"Pass 1 schedule database saved to: {pass1_db_path}")
     except Exception as e:
-        flush_print(f"âš ï¸ Error exporting Pass 1 to database: {e}")
+        flush_print(f"Error exporting Pass 1 to database: {e}")
         import traceback
         traceback.print_exc()
         sys.stdout.flush()
@@ -539,7 +540,7 @@ def run_two_pass_scheduler(config, subjects, rooms, faculty, batches, subjects_m
     # ============================================================================
     # AGGRESSIVE MEMORY CLEANUP BETWEEN PASSES
     # ============================================================================
-    print("\nðŸ§¹ Cleaning up Pass 1 memory...")
+    print("\nCleaning up Pass 1 memory...")
     
     # Delete solver and results explicitly
     del solver_pass1
@@ -553,7 +554,7 @@ def run_two_pass_scheduler(config, subjects, rooms, faculty, batches, subjects_m
     # Small delay to allow OS to reclaim memory
     time.sleep(0.5)
     
-    print("âœ“ Memory cleanup complete")
+    print("Memory cleanup complete")
     
     # ============================================================================
     # PASS 2: Full model (WITH soft constraints)
@@ -587,7 +588,7 @@ if __name__ == '__main__':
         # Update subjects_map to only include filtered subjects
         subjects_map = {sub.subject_id: sub for sub in subjects}
     else:
-        print("\nâš ï¸  Infeasible subject filtering is DISABLED")
+        print("\nInfeasible subject filtering is DISABLED")
         print("   Set FILTER_INFEASIBLE_SUBJECTS to true in config.json to enable\n")
 
     # ============ SEED CONFIGURATION ============
@@ -598,10 +599,10 @@ if __name__ == '__main__':
     # ============================================
 
     hour_time_limit = 0
-    minute_time_limit = 5
+    minute_time_limit = 15
     
     hour_time_seed = 0
-    minute_time_seed = 5
+    minute_time_seed = 15
     
     total_time_limit_input = round(((hour_time_limit * 60) + minute_time_limit) * 60)
     time_per_seed_input = round((hour_time_seed * 60) + minute_time_seed) * 60 
@@ -630,7 +631,7 @@ if __name__ == '__main__':
         num_room_types=num_room_types,
         num_subject_types=num_subject_types
     )
-    print(f"ðŸ“ Output folder: {output_folder}")
+    print(f"Output folder: {output_folder}")
 
     if is_deterministic_active:
         print("Deterministic Mode Activated")
@@ -641,7 +642,7 @@ if __name__ == '__main__':
         # ============================================================================
         # SEED SEARCH MODE: Try multiple seeds and keep the best
         # ============================================================================
-        print("ðŸŽ² Running with RANDOM SEED SEARCH")
+        print("Running with RANDOM SEED SEARCH")
         print(f"Up to {num_seeds_input} seeds, {time_per_seed_input}s each, {total_time_limit_input}s total")
         print("=" * 70)
         
@@ -659,12 +660,12 @@ if __name__ == '__main__':
         for i in range(num_seeds_input):
             elapsed = time.time() - start_time
             if elapsed >= total_time_limit_input:
-                print(f"\nâ° Total time limit reached ({total_time_limit_input}s)")
+                print(f"\nTotal time limit reached ({total_time_limit_input}s)")
                 break
             
             seed = random.randint(0, 999999)
             seeds_tried += 1
-            print(f"\nðŸ” Attempt {seeds_tried}/{num_seeds_input} - Seed: {seed}")
+            print(f"\nAttempt {seeds_tried}/{num_seeds_input} - Seed: {seed}")
             
             # Create subfolder for this seed
             seed_folder = os.path.join(output_folder, f"seed_{seed}")
@@ -675,14 +676,14 @@ if __name__ == '__main__':
                 config, subjects, rooms, faculty, batches, subjects_map,
                 seed=seed,
                 pass1_time=pass1_time_per_seed,
-                pass2_time=pass2_time_per_seed*0,
+                pass2_time=pass2_time_per_seed*1,
                 output_folder=seed_folder,
                 deterministic_mode=is_deterministic_active
             )
             
             if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
                 penalty = solver.ObjectiveValue()
-                print(f"   âœ… Solution found - Penalty: {penalty}")
+                print(f"   Solution found - Penalty: {penalty}")
                 
                 # Save full outputs for this seed
                 violation_report_path = os.path.join(seed_folder, "violation_report.txt")
@@ -712,33 +713,33 @@ if __name__ == '__main__':
                 db_path = os.path.join(seed_folder, "schedule.db")
                 save_schedule_with_full_view(status, solver, results, config, subjects, rooms, faculty, batches, db_path=db_path)
                 
-                print(f"   ðŸ“ Outputs saved to: {seed_folder}")
+                print(f"   Outputs saved to: {seed_folder}")
                 
                 # Track best solution
                 if penalty < best_penalty:
                     best_penalty = penalty
                     best_solution = (status, solver, results)
                     best_seed = seed
-                    print(f"   ðŸŒŸ NEW BEST SOLUTION! (Penalty: {penalty})")
+                    print(f"   NEW BEST SOLUTION! (Penalty: {penalty})")
             else:
-                print(f"   âŒ No solution found")
+                print(f"   No solution found")
         
         print("\n" + "=" * 70)
         if best_solution:
             status, solver, results = best_solution
-            print(f"âœ… Seed search complete!")
+            print(f"Seed search complete!")
             print(f"   Best seed: {best_seed}")
             print(f"   Best penalty: {best_penalty}")
             print(f"   Seeds tried: {seeds_tried}")
             print(f"   Best solution: {os.path.join(output_folder, f'seed_{best_seed}')}")
         else:
-            print("âŒ No feasible solution found during seed search.")
+            print("No feasible solution found during seed search.")
             status, solver, results = None, None, None
     else:
         # ============================================================================
         # SINGLE SEED MODE: Run with custom seed
         # ============================================================================
-        print(f"ðŸŽ¯ Running with CUSTOM SEED: {CUSTOM_SEED}")
+        print(f"Running with CUSTOM SEED: {CUSTOM_SEED}")
         
         # Time allocation (30% Pass 1, 70% Pass 2 - same as seed search)
         pass1_time = int(total_time_limit_input * 1)
@@ -750,7 +751,7 @@ if __name__ == '__main__':
             config, subjects, rooms, faculty, batches, subjects_map,
             seed=CUSTOM_SEED,
             pass1_time=pass1_time,
-            pass2_time=pass2_time*0,
+            pass2_time=pass2_time*1,
             output_folder=output_folder,
             deterministic_mode=is_deterministic_active
         )
@@ -771,7 +772,7 @@ if __name__ == '__main__':
             subjects_map=subjects_map,
             output_file=violation_report_path
         )
-        print(f"\nâœ… Violation report saved to: {violation_report_path}")
+        print(f"\nViolation report saved to: {violation_report_path}")
 
         # Save raw violations to output folder (no terminal output)
         raw_violations_path = os.path.join(output_folder, "raw_violations.xlsx")
@@ -788,8 +789,12 @@ if __name__ == '__main__':
 
         # Save database to output folder
         db_path = os.path.join(output_folder, "schedule.db")
-        save_schedule_with_full_view(status, solver, results, config, subjects, rooms, faculty, batches, db_path=db_path)
+        save_schedule_with_full_view(status, solver, results, config, subjects, rooms, faculty, batches, subjects_map, db_path=db_path)
         
-        print(f"\nðŸ“ All outputs saved to: {output_folder}")
+        # Export detailed soft time violation reports
+        export_soft_time_violations_detailed(solver, results, config, faculty, batches, output_folder)
+        
+        print(f"\nAll outputs saved to: {output_folder}")
+
     else:
-        print("\nâŒ No feasible solution found. No outputs generated.")
+        print("\nNo feasible solution found. No outputs generated.")

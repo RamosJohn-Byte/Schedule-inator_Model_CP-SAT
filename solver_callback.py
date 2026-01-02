@@ -70,7 +70,7 @@ class SolutionPrinterCallback(cp_model.CpSolverSolutionCallback):
             ratio = penalty_decrease / time_diff if time_diff > 0 else 0
             branches_per_sec = delta_branches / time_diff if time_diff > 0 else 0
             conflicts_per_sec = delta_conflicts / time_diff if time_diff > 0 else 0
-            output += f' (↓{penalty_decrease} in {time_diff:.1f}s, ratio: {ratio:.1f}/s)'
+            output += f' (down {penalty_decrease} in {time_diff:.1f}s, ratio: {ratio:.1f}/s)'
             output += f' | br/s: {branches_per_sec:,.0f}, cf/s: {conflicts_per_sec:,.0f}, gap: {gap_percent:.1f}%'
         else:
             output += f' | gap: {gap_percent:.1f}%'
