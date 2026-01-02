@@ -89,15 +89,27 @@ def print_ghost_grid_debug(faculty_ghost_grid, batch_ghost_grid, faculty, batche
                 for slot_idx, ghost_slot in enumerate(ghost_slots):
                     start_abs = ghost_slot["start_abs"]
                     end_abs = ghost_slot["end_abs"]
-                    ghost_active = ghost_slot["ghost_active"]
                     
-                    # Get solver values
+                    # Handle both controller types (ghost_active for ghost blocks, time_slot for slot oracle)
                     try:
-                        is_active = solver.Value(ghost_active)
-                        status = "X" if is_active else "O"
-                        state = "VACANT" if is_active else "OCCUPIED"
-                        
-                        # Get streak values
+                        if "ghost_active" in ghost_slot:
+                            # Ghost Block Controller: time_slot = NOT(ghost_active)
+                            ghost_active = ghost_slot["ghost_active"]
+                            is_ghost_active = solver.Value(ghost_active)
+                            status = "X" if is_ghost_active else "O"
+                            state = "VACANT" if is_ghost_active else "OCCUPIED"
+                        else:
+                            # Slot Oracle Controller: time_slot directly indicates occupation
+                            time_slot = ghost_slot["time_slot"]
+                            is_occupied = solver.Value(time_slot)
+                            status = "O" if is_occupied else "X"
+                            state = "OCCUPIED" if is_occupied else "VACANT"
+                    except:
+                        status = "?"
+                        state = "UNKNOWN"
+                    
+                    # Get streak values
+                    try:
                         active_val = solver.Value(active_streaks[slot_idx]) if slot_idx < len(active_streaks) else "?"
                         vacant_val = solver.Value(vacant_streaks[slot_idx]) if slot_idx < len(vacant_streaks) else "?"
                         
@@ -105,8 +117,6 @@ def print_ghost_grid_debug(faculty_ghost_grid, batch_ghost_grid, faculty, batche
                         block_ends_val = solver.Value(block_ends_list[slot_idx]) if slot_idx < len(block_ends_list) else 0
                         gap_ends_val = solver.Value(gap_ends_list[slot_idx]) if slot_idx < len(gap_ends_list) and gap_ends_list[slot_idx] is not None else 0
                     except:
-                        status = "?"
-                        state = "UNKNOWN"
                         active_val = "?"
                         vacant_val = "?"
                         block_ends_val = 0
@@ -142,15 +152,27 @@ def print_ghost_grid_debug(faculty_ghost_grid, batch_ghost_grid, faculty, batche
                 for slot_idx, ghost_slot in enumerate(ghost_slots):
                     start_abs = ghost_slot["start_abs"]
                     end_abs = ghost_slot["end_abs"]
-                    ghost_active = ghost_slot["ghost_active"]
                     
-                    # Get solver values
+                    # Handle both controller types (ghost_active for ghost blocks, time_slot for slot oracle)
                     try:
-                        is_active = solver.Value(ghost_active)
-                        status = "X" if is_active else "O"
-                        state = "VACANT" if is_active else "OCCUPIED"
-                        
-                        # Get streak values
+                        if "ghost_active" in ghost_slot:
+                            # Ghost Block Controller: time_slot = NOT(ghost_active)
+                            ghost_active = ghost_slot["ghost_active"]
+                            is_ghost_active = solver.Value(ghost_active)
+                            status = "X" if is_ghost_active else "O"
+                            state = "VACANT" if is_ghost_active else "OCCUPIED"
+                        else:
+                            # Slot Oracle Controller: time_slot directly indicates occupation
+                            time_slot = ghost_slot["time_slot"]
+                            is_occupied = solver.Value(time_slot)
+                            status = "O" if is_occupied else "X"
+                            state = "OCCUPIED" if is_occupied else "VACANT"
+                    except:
+                        status = "?"
+                        state = "UNKNOWN"
+                    
+                    # Get streak values
+                    try:
                         active_val = solver.Value(active_streaks[slot_idx]) if slot_idx < len(active_streaks) else "?"
                         vacant_val = solver.Value(vacant_streaks[slot_idx]) if slot_idx < len(vacant_streaks) else "?"
                         
@@ -158,8 +180,6 @@ def print_ghost_grid_debug(faculty_ghost_grid, batch_ghost_grid, faculty, batche
                         block_ends_val = solver.Value(block_ends_list[slot_idx]) if slot_idx < len(block_ends_list) else 0
                         gap_ends_val = solver.Value(gap_ends_list[slot_idx]) if slot_idx < len(gap_ends_list) and gap_ends_list[slot_idx] is not None else 0
                     except:
-                        status = "?"
-                        state = "UNKNOWN"
                         active_val = "?"
                         vacant_val = "?"
                         block_ends_val = 0

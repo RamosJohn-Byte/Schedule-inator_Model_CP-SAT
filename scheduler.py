@@ -695,9 +695,9 @@ def print_raw_violations(solver, results, faculty, batches, config, print_to_ter
                         df = pd.DataFrame(records)
                         safe_sheet_name = v_type.replace('_', ' ').title()[:31]
                         df.to_excel(writer, sheet_name=safe_sheet_name, index=False)
-                print(f"\n✓ Structural violations saved to: {structural_filename}")
+                print(f"\nStructural violations saved to: {structural_filename}")
             except Exception as e:
-                print(f"\n❌ Error saving structural violations: {e}")
+                print(f"\nERROR saving structural violations: {e}")
         else:
             print("\nNo structural violation data to save.")
         
@@ -708,9 +708,9 @@ def print_raw_violations(solver, results, faculty, batches, config, print_to_ter
                         df = pd.DataFrame(records)
                         safe_sheet_name = v_type.replace('_', ' ').title()[:31]
                         df.to_excel(writer, sheet_name=safe_sheet_name, index=False)
-                print(f"✓ Soft constraint penalties saved to: {soft_filename}")
+                print(f"Soft constraint penalties saved to: {soft_filename}")
             except Exception as e:
-                print(f"\n❌ Error saving soft constraint penalties: {e}")
+                print(f"\nERROR saving soft constraint penalties: {e}")
         else:
             print("No soft constraint penalty data to save.")
 
@@ -776,7 +776,7 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
     if TIME_GRANULARITY not in [10, 30]:
         raise ValueError(f"TIME_GRANULARITY_MINUTES must be 10 or 30, got {TIME_GRANULARITY}")
     
-    print(f"⏱️  Time Granularity: {TIME_GRANULARITY} minutes")
+    print(f"Time Granularity: {TIME_GRANULARITY} minutes")
     
     model = cp_model.CpModel()
 
@@ -1124,8 +1124,11 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
     # Create timeslot grid data structure (will be populated by controller)
     timeslot_data = create_timeslot_grid_data(model, faculty, batches, config)
     
-    # Apply Ghost Block Controller (creates ghost intervals, time_slots, inverter constraints)
-    ghost_data = apply_ghostblock_controller(
+    # ==== CONTROLLER SELECTION ==== 
+    # Uncomment ONE of the following controller options (use triple quotes to toggle):
+    
+    # OPTION 1: Ghost Block Controller (indirect vacancy tracking via collision physics)
+    controller_data = apply_ghostblock_controller(
         model, timeslot_data, faculty, batches,
         intervals_per_faculty, intervals_per_batch,
         is_assigned_faculty_map, is_assigned_batch_map,
@@ -1133,9 +1136,18 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
         meetings, faculty_qualified_subjects
     )
     
-    # Extract results from controller
-    faculty_ghost_grid = ghost_data['faculty_ghost_grid']
-    batch_ghost_grid = ghost_data['batch_ghost_grid']
+    # OPTION 2: Slot Oracle Controller (slots query meetings for coverage)
+    """ from timeslot_system.controllers import apply_slot_oracle_controller
+    controller_data = apply_slot_oracle_controller(
+        model, timeslot_data, faculty, batches,
+        is_assigned_faculty_map, is_assigned_batch_map,
+        active_for_faculty_map, active_for_batch_map,
+        meetings, faculty_qualified_subjects
+    ) """
+   
+    # Extract results from controller (both controllers return same structure)
+    faculty_ghost_grid = controller_data['faculty_ghost_grid']
+    batch_ghost_grid = controller_data['batch_ghost_grid']
 
 #================================== END OF TIMESLOT SYSTEM - INITIALIZATION ==================================
 
@@ -1819,7 +1831,7 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
         import sys
         with open(model_stats_file, 'w', encoding='utf-8') as f:
             f.write("=" * 80 + "\n")
-            f.write("MODEL STATISTICS\n")
+            f.write("MODEL STATISTICS (Pre-Presolve)\n")
             f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write("=" * 80 + "\n\n")
             
@@ -1827,37 +1839,92 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
                 proto = model.Proto()
                 num_vars = len(proto.variables)
                 num_constraints = len(proto.constraints)
-                f.write(f"Variables: {num_vars:,}\n")
-                f.write(f"Constraints: {num_constraints:,}\n")
+                f.write(f"Total Variables: {num_vars:,}\n")
+                f.write(f"Total Constraints: {num_constraints:,}\n")
                 f.write(f"Search workers: {solver.parameters.num_search_workers}\n")
                 f.write(f"Deterministic mode: {deterministic_mode}\n")
                 f.write(f"Random seed: {random_seed if random_seed else 'default'}\n\n")
                 
+                # Count variable types by name patterns
+                f.write("\n" + "=" * 80 + "\n")
+                f.write("VARIABLE BREAKDOWN BY TYPE\n")
+                f.write("=" * 80 + "\n")
+                
+                var_categories = {
+                    'Timeslot (time_slot)': 0,
+                    'Coverage Detection (starts_before/ends_after/covers)': 0,
+                    'Ghost Intervals (ghost_)': 0,
+                    'Meeting Variables (start/duration/end/is_active)': 0,
+                    'Faculty Assignment (faculty_/is_assigned_faculty)': 0,
+                    'Room Assignment (room_/is_assigned_room)': 0,
+                    'Batch Assignment (batch_/section_batch)': 0,
+                    'Streak Tracking (active_streak/vacant_streak)': 0,
+                    'Violation Tracking (violation/dummy/overload/underfill)': 0,
+                    'Gap Tracking (gap_ends/block_ends/day_gap)': 0,
+                    'Other': 0
+                }
+                
+                for var in proto.variables:
+                    name = var.name
+                    if 'timeslot_' in name:
+                        var_categories['Timeslot (time_slot)'] += 1
+                    elif any(x in name for x in ['starts_before', 'ends_after', '_covers_', 'meeting_covers']):
+                        var_categories['Coverage Detection (starts_before/ends_after/covers)'] += 1
+                    elif 'ghost_' in name:
+                        var_categories['Ghost Intervals (ghost_)'] += 1
+                    elif any(x in name for x in ['start_', 'duration_', 'end_', 'is_active_', 'interval_']):
+                        var_categories['Meeting Variables (start/duration/end/is_active)'] += 1
+                    elif any(x in name for x in ['faculty_', 'is_assigned_faculty', 'active_for_faculty', 'teach_']):
+                        var_categories['Faculty Assignment (faculty_/is_assigned_faculty)'] += 1
+                    elif any(x in name for x in ['room_', 'is_assigned_room', 'active_for_room', 'cap_']):
+                        var_categories['Room Assignment (room_/is_assigned_room)'] += 1
+                    elif any(x in name for x in ['batch_', 'section_batch', 'is_assigned_batch', 'active_for_batch', 'assign_']):
+                        var_categories['Batch Assignment (batch_/section_batch)'] += 1
+                    elif any(x in name for x in ['active_streak', 'vacant_streak']):
+                        var_categories['Streak Tracking (active_streak/vacant_streak)'] += 1
+                    elif any(x in name for x in ['violation', 'dummy', 'overload', 'underfill', 'overcapacity', 'overfill']):
+                        var_categories['Violation Tracking (violation/dummy/overload/underfill)'] += 1
+                    elif any(x in name for x in ['gap_ends', 'block_ends', 'day_gap', 'has_before', 'has_after', 'has_class']):
+                        var_categories['Gap Tracking (gap_ends/block_ends/day_gap)'] += 1
+                    else:
+                        var_categories['Other'] += 1
+                
+                for category, count in sorted(var_categories.items(), key=lambda x: -x[1]):
+                    if count > 0:
+                        pct = (count / num_vars * 100) if num_vars > 0 else 0
+                        f.write(f"  {category:<60} {count:>8,} ({pct:>5.1f}%)\n")
+                
                 # Count constraint types
+                f.write("\n" + "=" * 80 + "\n")
+                f.write("CONSTRAINT BREAKDOWN BY TYPE\n")
+                f.write("=" * 80 + "\n")
+                
                 constraint_types = {}
                 for c in proto.constraints:
                     c_type = c.WhichOneof('constraint')
                     constraint_types[c_type] = constraint_types.get(c_type, 0) + 1
                 
-                f.write("\nConstraint breakdown:\n")
-                f.write("-" * 40 + "\n")
                 for c_type, count in sorted(constraint_types.items(), key=lambda x: -x[1]):
-                    f.write(f"  {c_type}: {count:,}\n")
+                    if c_type:
+                        pct = (count / num_constraints * 100) if num_constraints > 0 else 0
+                        f.write(f"  {c_type:<40} {count:>8,} ({pct:>5.1f}%)\n")
                     
             except Exception as e:
                 f.write(f"\nError generating statistics: {e}\n")
+                import traceback
+                f.write(traceback.format_exc())
         
-        print(f"📊 Model statistics saved to: {model_stats_file}")
+        print(f"Model statistics saved to: {model_stats_file}")
         sys.stdout.flush()
     # Try to validate the model before solving
-    print("🔍 Validating model...")
+    print("Validating model...")
     sys.stdout.flush()
     try:
         model_str = model.Proto()  # This will fail if model has issues
-        print(f"✓ Model proto generated successfully")
+        print(f"Model proto generated successfully")
         sys.stdout.flush()
     except Exception as e:
-        print(f"❌ Model validation failed: {e}")
+        print(f"ERROR - Model validation failed: {e}")
         import traceback
         traceback.print_exc()
         sys.stdout.flush()
@@ -1884,7 +1951,7 @@ def run_scheduler(config, subjects, rooms, faculty, batches, subjects_map, time_
                 f.write(msg + '\n')
         
         solver.log_callback = log_callback
-        print(f"📝 Solver logs will be saved to: {solver_log_file}")
+        print(f"Solver logs will be saved to: {solver_log_file}")
     
     # PASS 1: MINIMIZE STRUCTURAL VIOLATIONS
     if pass_mode in ["pass1", "full"]:

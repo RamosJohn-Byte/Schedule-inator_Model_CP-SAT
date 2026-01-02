@@ -14,14 +14,14 @@ from data_models import Program, Room, Faculty, Subject, Batch, BannedTime, Time
 from scheduler import run_scheduler
 from utils import flush_print, create_output_folder, load_config
 from export_db import save_schedule_to_db, save_schedule_with_full_view
-from export_reports import print_raw_violations, generate_violation_report
+from export_reports import print_raw_violations, human_readable_violation_report
 from export_debug import export_soft_time_violations_detailed
 
 
 # NOTE: The following functions have been moved to modular files:
 # - flush_print, create_output_folder, load_config -> utils.py
 # - save_schedule_to_db, save_schedule_with_full_view -> export_db.py
-# - print_raw_violations, generate_violation_report -> export_reports.py
+# - print_raw_violations, human_readable_violation_report -> export_reports.py
 
 def load_data(config, model):
     # Data folder path (change this to switch between data sets)
@@ -434,7 +434,7 @@ def filter_infeasible_subjects(subjects, rooms, faculty, batches, config):
                 subject_name = sub.name if hasattr(sub, 'name') else item['subject_id']
                 reasons_str = ", ".join([f"No {r}" for r in item["reasons"]])
                 f.write(f"{item['subject_id']} ({subject_name}) - {reasons_str}\n")
-        print(f"📝 Removed subjects list saved to: {output_file}")
+        print(f"Removed subjects list saved to: {output_file}")
     
     return filtered_subjects, removed_subjects_with_reasons
 
@@ -483,7 +483,7 @@ def run_two_pass_scheduler(config, subjects, rooms, faculty, batches, subjects_m
     flush_print("Generating Pass 1 violation report...")
     try:
         pass1_violation_report_path = os.path.join(output_folder, "pass1_violation_report.txt")
-        generate_violation_report(
+        human_readable_violation_report(
             solver=solver_pass1,
             results=results_pass1,
             config=config,
@@ -715,7 +715,7 @@ if __name__ == '__main__':
                 
                 # Save full outputs for this seed
                 violation_report_path = os.path.join(seed_folder, "violation_report.txt")
-                generate_violation_report(
+                human_readable_violation_report(
                     solver=solver,
                     results=results,
                     config=config,
@@ -790,7 +790,7 @@ if __name__ == '__main__':
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
         # Save violation report to output folder
         violation_report_path = os.path.join(output_folder, "violation_report.txt")
-        generate_violation_report(
+        human_readable_violation_report(
             solver=solver,
             results=results,
             config=config,

@@ -491,141 +491,161 @@ def export_soft_time_violations_detailed(solver, results, config, faculty, batch
     # ========================================================================
     faculty_under_min_data = violations.get("faculty_under_minimum_block", {})
     if faculty_under_min_data:
-        filepath = os.path.join(output_dir, "faculty_under_minimum_block_detailed.xlsx")
-        with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
-            for f_idx in sorted(faculty_under_min_data.keys()):
-                faculty_obj = faculty[f_idx]
-                sheet_name = f"{f_idx}_{faculty_obj.name}"[:31]  # Excel sheet name limit
+        all_sheets = {}
+        for f_idx in sorted(faculty_under_min_data.keys()):
+            faculty_obj = faculty[f_idx]
+            sheet_name = f"{f_idx}_{faculty_obj.name}"[:31]  # Excel sheet name limit
+            
+            rows = []
+            for day_idx in sorted(faculty_under_min_data[f_idx].keys()):
+                day_name = SCHEDULING_DAYS[day_idx] if day_idx < len(SCHEDULING_DAYS) else f"Day{day_idx}"
                 
-                rows = []
-                for day_idx in sorted(faculty_under_min_data[f_idx].keys()):
-                    day_name = SCHEDULING_DAYS[day_idx] if day_idx < len(SCHEDULING_DAYS) else f"Day{day_idx}"
-                    
-                    for slot_idx, var in enumerate(faculty_under_min_data[f_idx][day_idx]):
-                        violation_value = solver.Value(var)
-                        if violation_value > 0:
-                            penalty = violation_value * under_min_block_penalty_per_slot
-                            rows.append({
-                                "Faculty ID": f_idx,
-                                "Faculty Name": faculty_obj.name,
-                                "Day Index": day_idx,
-                                "Day Name": day_name,
-                                "Slot Index": slot_idx,
-                                "Start Time": slot_to_time(slot_idx),
-                                "Violation (slots)": violation_value,
-                                "Penalty Points": penalty
-                            })
-                
-                if rows:
-                    df = pd.DataFrame(rows)
-                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+                for slot_idx, var in enumerate(faculty_under_min_data[f_idx][day_idx]):
+                    violation_value = solver.Value(var)
+                    if violation_value > 0:
+                        penalty = violation_value * under_min_block_penalty_per_slot
+                        rows.append({
+                            "Faculty ID": f_idx,
+                            "Faculty Name": faculty_obj.name,
+                            "Day Index": day_idx,
+                            "Day Name": day_name,
+                            "Slot Index": slot_idx,
+                            "Start Time": slot_to_time(slot_idx),
+                            "Violation (slots)": violation_value,
+                            "Penalty Points": penalty
+                        })
+            
+            if rows:
+                all_sheets[sheet_name] = pd.DataFrame(rows)
         
-        print(f"[Soft Violations] Faculty under minimum block exported to: {filepath}")
+        if all_sheets:
+            filepath = os.path.join(output_dir, "faculty_under_minimum_block_detailed.xlsx")
+            with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+                for sheet_name, df in all_sheets.items():
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+            print(f"[Soft Violations] Faculty under minimum block exported to: {filepath}")
+        else:
+            print(f"[Soft Violations] Faculty under minimum block: No violations found")
     
     # ========================================================================
     # FACULTY EXCESS GAPS
     # ========================================================================
     faculty_excess_gaps_data = violations.get("faculty_excess_gaps", {})
     if faculty_excess_gaps_data:
-        filepath = os.path.join(output_dir, "faculty_excess_gaps_detailed.xlsx")
-        with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
-            for f_idx in sorted(faculty_excess_gaps_data.keys()):
-                faculty_obj = faculty[f_idx]
-                sheet_name = f"{f_idx}_{faculty_obj.name}"[:31]
+        all_sheets = {}
+        for f_idx in sorted(faculty_excess_gaps_data.keys()):
+            faculty_obj = faculty[f_idx]
+            sheet_name = f"{f_idx}_{faculty_obj.name}"[:31]
+            
+            rows = []
+            for day_idx in sorted(faculty_excess_gaps_data[f_idx].keys()):
+                day_name = SCHEDULING_DAYS[day_idx] if day_idx < len(SCHEDULING_DAYS) else f"Day{day_idx}"
                 
-                rows = []
-                for day_idx in sorted(faculty_excess_gaps_data[f_idx].keys()):
-                    day_name = SCHEDULING_DAYS[day_idx] if day_idx < len(SCHEDULING_DAYS) else f"Day{day_idx}"
-                    
-                    for slot_idx, var in enumerate(faculty_excess_gaps_data[f_idx][day_idx]):
-                        violation_value = solver.Value(var)
-                        if violation_value > 0:
-                            penalty = violation_value * excess_gap_penalty_per_slot
-                            rows.append({
-                                "Faculty ID": f_idx,
-                                "Faculty Name": faculty_obj.name,
-                                "Day Index": day_idx,
-                                "Day Name": day_name,
-                                "Slot Index": slot_idx,
-                                "Start Time": slot_to_time(slot_idx),
-                                "Violation (slots)": violation_value,
-                                "Penalty Points": penalty
-                            })
-                
-                if rows:
-                    df = pd.DataFrame(rows)
-                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+                for slot_idx, var in enumerate(faculty_excess_gaps_data[f_idx][day_idx]):
+                    violation_value = solver.Value(var)
+                    if violation_value > 0:
+                        penalty = violation_value * excess_gap_penalty_per_slot
+                        rows.append({
+                            "Faculty ID": f_idx,
+                            "Faculty Name": faculty_obj.name,
+                            "Day Index": day_idx,
+                            "Day Name": day_name,
+                            "Slot Index": slot_idx,
+                            "Start Time": slot_to_time(slot_idx),
+                            "Violation (slots)": violation_value,
+                            "Penalty Points": penalty
+                        })
+            
+            if rows:
+                all_sheets[sheet_name] = pd.DataFrame(rows)
         
-        print(f"[Soft Violations] Faculty excess gaps exported to: {filepath}")
+        if all_sheets:
+            filepath = os.path.join(output_dir, "faculty_excess_gaps_detailed.xlsx")
+            with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+                for sheet_name, df in all_sheets.items():
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+            print(f"[Soft Violations] Faculty excess gaps exported to: {filepath}")
+        else:
+            print(f"[Soft Violations] Faculty excess gaps: No violations found")
     
     # ========================================================================
     # BATCH UNDER MINIMUM BLOCK
     # ========================================================================
     batch_under_min_data = violations.get("batch_under_minimum_block", {})
     if batch_under_min_data:
-        filepath = os.path.join(output_dir, "batch_under_minimum_block_detailed.xlsx")
-        with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
-            for b_idx in sorted(batch_under_min_data.keys()):
-                batch_obj = batches[b_idx]
-                sheet_name = f"{b_idx}_{batch_obj.batch_id}"[:31]
+        all_sheets = {}
+        for b_idx in sorted(batch_under_min_data.keys()):
+            batch_obj = batches[b_idx]
+            sheet_name = f"{b_idx}_{batch_obj.batch_id}"[:31]
+            
+            rows = []
+            for day_idx in sorted(batch_under_min_data[b_idx].keys()):
+                day_name = SCHEDULING_DAYS[day_idx] if day_idx < len(SCHEDULING_DAYS) else f"Day{day_idx}"
                 
-                rows = []
-                for day_idx in sorted(batch_under_min_data[b_idx].keys()):
-                    day_name = SCHEDULING_DAYS[day_idx] if day_idx < len(SCHEDULING_DAYS) else f"Day{day_idx}"
-                    
-                    for slot_idx, var in enumerate(batch_under_min_data[b_idx][day_idx]):
-                        violation_value = solver.Value(var)
-                        if violation_value > 0:
-                            penalty = violation_value * under_min_block_penalty_per_slot
-                            rows.append({
-                                "Batch ID": b_idx,
-                                "Batch Name": batch_obj.batch_id,
-                                "Day Index": day_idx,
-                                "Day Name": day_name,
-                                "Slot Index": slot_idx,
-                                "Start Time": slot_to_time(slot_idx),
-                                "Violation (slots)": violation_value,
-                                "Penalty Points": penalty
-                            })
-                
-                if rows:
-                    df = pd.DataFrame(rows)
-                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+                for slot_idx, var in enumerate(batch_under_min_data[b_idx][day_idx]):
+                    violation_value = solver.Value(var)
+                    if violation_value > 0:
+                        penalty = violation_value * under_min_block_penalty_per_slot
+                        rows.append({
+                            "Batch ID": b_idx,
+                            "Batch Name": batch_obj.batch_id,
+                            "Day Index": day_idx,
+                            "Day Name": day_name,
+                            "Slot Index": slot_idx,
+                            "Start Time": slot_to_time(slot_idx),
+                            "Violation (slots)": violation_value,
+                            "Penalty Points": penalty
+                        })
+            
+            if rows:
+                all_sheets[sheet_name] = pd.DataFrame(rows)
         
-        print(f"[Soft Violations] Batch under minimum block exported to: {filepath}")
+        if all_sheets:
+            filepath = os.path.join(output_dir, "batch_under_minimum_block_detailed.xlsx")
+            with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+                for sheet_name, df in all_sheets.items():
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+            print(f"[Soft Violations] Batch under minimum block exported to: {filepath}")
+        else:
+            print(f"[Soft Violations] Batch under minimum block: No violations found")
     
     # ========================================================================
     # BATCH EXCESS GAPS
     # ========================================================================
     batch_excess_gaps_data = violations.get("batch_excess_gaps", {})
     if batch_excess_gaps_data:
-        filepath = os.path.join(output_dir, "batch_excess_gaps_detailed.xlsx")
-        with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
-            for b_idx in sorted(batch_excess_gaps_data.keys()):
-                batch_obj = batches[b_idx]
-                sheet_name = f"{b_idx}_{batch_obj.batch_id}"[:31]
+        all_sheets = {}
+        for b_idx in sorted(batch_excess_gaps_data.keys()):
+            batch_obj = batches[b_idx]
+            sheet_name = f"{b_idx}_{batch_obj.batch_id}"[:31]
+            
+            rows = []
+            for day_idx in sorted(batch_excess_gaps_data[b_idx].keys()):
+                day_name = SCHEDULING_DAYS[day_idx] if day_idx < len(SCHEDULING_DAYS) else f"Day{day_idx}"
                 
-                rows = []
-                for day_idx in sorted(batch_excess_gaps_data[b_idx].keys()):
-                    day_name = SCHEDULING_DAYS[day_idx] if day_idx < len(SCHEDULING_DAYS) else f"Day{day_idx}"
-                    
-                    for slot_idx, var in enumerate(batch_excess_gaps_data[b_idx][day_idx]):
-                        violation_value = solver.Value(var)
-                        if violation_value > 0:
-                            penalty = violation_value * excess_gap_penalty_per_slot
-                            rows.append({
-                                "Batch ID": b_idx,
-                                "Batch Name": batch_obj.batch_id,
-                                "Day Index": day_idx,
-                                "Day Name": day_name,
-                                "Slot Index": slot_idx,
-                                "Start Time": slot_to_time(slot_idx),
-                                "Violation (slots)": violation_value,
-                                "Penalty Points": penalty
-                            })
-                
-                if rows:
-                    df = pd.DataFrame(rows)
-                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+                for slot_idx, var in enumerate(batch_excess_gaps_data[b_idx][day_idx]):
+                    violation_value = solver.Value(var)
+                    if violation_value > 0:
+                        penalty = violation_value * excess_gap_penalty_per_slot
+                        rows.append({
+                            "Batch ID": b_idx,
+                            "Batch Name": batch_obj.batch_id,
+                            "Day Index": day_idx,
+                            "Day Name": day_name,
+                            "Slot Index": slot_idx,
+                            "Start Time": slot_to_time(slot_idx),
+                            "Violation (slots)": violation_value,
+                            "Penalty Points": penalty
+                        })
+            
+            if rows:
+                all_sheets[sheet_name] = pd.DataFrame(rows)
         
-        print(f"[Soft Violations] Batch excess gaps exported to: {filepath}")
+        if all_sheets:
+            filepath = os.path.join(output_dir, "batch_excess_gaps_detailed.xlsx")
+            with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+                for sheet_name, df in all_sheets.items():
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+            print(f"[Soft Violations] Batch excess gaps exported to: {filepath}")
+        else:
+            print(f"[Soft Violations] Batch excess gaps: No violations found")
